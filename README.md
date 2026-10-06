@@ -102,11 +102,11 @@ python tools/tune_matcher.py      # 匹配调参（阈值扫描表，决定是�
 
 ### 本工程路径含中文（重要）
 
-工作区是 `E:\Desktop\宋词辅助`，AGP 默认会直接报错
+本工程最初在**含中文的目录**（Windows 上的 `E:\Desktop\宋词辅助`）下开发，而 AGP 默认会直接报错
 （`Your project path contains non-ASCII characters`）。工程里已经用
-`android.overridePathCheck=true` 关掉该检查，实测 Windows + JDK17 + Gradle 8.7 +
-AGP 8.5.2 全流程可构建（单测 52 个全过、release 打包成功）。
-若在别的中文路径下遇到离奇失败，优先怀疑这一项。
+`android.overridePathCheck=true` 关掉该检查，实测 Windows + JDK 17 + Gradle 8.7 +
+AGP 8.5.2 全流程可构建（单测全过、release 打包成功）。
+若在别的中文路径下遇到离奇失败，优先怀疑这一项；想避开的话，把仓库克隆到纯 ASCII 路径即可。
 
 ## 目标设备
 
@@ -289,7 +289,7 @@ M1~M3 代码已完成（骨架 + 引导页 + 悬浮窗 + 取帧 + OCR + 两段�
 | 索引生成 + 校验 | `python tools/gen_verse_index.py` | 通过（99 条 / 40 词牌） |
 | 匹配算法复算 | `python tools/verify_all.py` | 全部通过 |
 | Kotlin/Java/资源编译 | `gradle compileDebugKotlin` | **通过**（60 个 class） |
-| **JVM 单元测试** | JUnitCore 跑编译产物 + CI 的 `testDebugUnitTest` | **OK (69 tests)**（两处都过） |
+| **JVM 单元测试** | JUnitCore 跑编译产物 + CI 的 `testDebugUnitTest` | **OK (75 tests)**（两处都过） |
 | **debug 打包（已签名）** | `gradle assembleDebug` | **成功**，44.4 MB，签名 DN `CN=Android Debug` |
 | **release 打包（已签名）** | `gradle assembleRelease` | **成功**，40.17 MB，含 R8 混淆 + 资源压缩 |
 | release 签名校验 | `apksigner verify --print-certs` | **通过**，v2 方案，指纹与 keystore 一致 |

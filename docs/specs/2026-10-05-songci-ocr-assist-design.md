@@ -5,7 +5,7 @@
 | 日期 | 2026-10-05 |
 | 状态 | **已实施**（v0.6.0 真机跑通；本文档保留为设计意图与取舍记录） |
 | 平台 | Android（原生 Kotlin，单 module） |
-| **工作区** | `E:\Desktop\宋词辅助`（本工程根目录；GitHub 仓库名仍为 `songci-ocr-assist`） |
+| **工作区** | 本工程根目录（开发时位于 Windows 中文路径下，见 README「本工程路径含中文」） |
 | 目标设备 | Android **16**（API 36），实测机型小米 17 Pro Max / HyperOS 3 |
 | 分发 | GitHub Actions 产出 APK，人工分发给使用者 |
 
@@ -92,7 +92,7 @@
 
 ## 3. 架构与组件
 
-工程根目录（`E:\Desktop\宋词辅助`）：
+工程根目录：
 
 ```
 ├── data/                             # 游戏导出的配置（**不入库**，属游戏素材；见 data/README.md）
@@ -331,7 +331,7 @@ jobs:
 | **M4 打磨 + 分发** | 省电、异常、release 签名、用户手册 | 真机手测清单全过，产出可分发 APK |
 
 **实际完成情况**：M1~M4 均已完成，并在真机（小米 17 Pro Max / HyperOS 3 / Android 16）
-端到端跑通、成功出框，已发布 [v0.6.0 Release](https://github.com/2233-123/songci-ocr-assist/releases/tag/v0.6.0)。
+端到端跑通、成功出框，已发布 v0.6.0 Release（见本仓库 Releases）。
 
 ## 13. 风险与未决问题
 
