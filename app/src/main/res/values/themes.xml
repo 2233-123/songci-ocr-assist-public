@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 沿用 DayNight 默认配色，只固定强调色（与高亮框一致） -->
+    <style name="Theme.SongciAssist" parent="Theme.AppCompat.DayNight.NoActionBar">
+        <item name="colorAccent">@color/highlight</item>
+    </style>
+</resources>

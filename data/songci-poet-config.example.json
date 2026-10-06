@@ -1,0 +1,13 @@
+{
+  "_comment": [
+    "本文件只演示 data/SongCiPoetConfig.json 的【结构骨架】，不含真实词人数据。",
+    "真实数据请从你自己的设备游戏中导出（见 data/README.md）。",
+    "字段含义：ID 词人 id（对应词句的 PoetIds）；Name 词人姓名。"
+  ],
+  "dataList": [
+    {
+      "ID": 1,
+      "Name": "示例词人"
+    }
+  ]
+}

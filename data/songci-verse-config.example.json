@@ -1,0 +1,24 @@
+{
+  "_comment": [
+    "本文件只演示 data/SongCiVerseConfig.json 的【结构骨架】，不含真实词句内容。",
+    "把它复制成 data/SongCiVerseConfig.json 只是让生成脚本能跑通结构；",
+    "真实词句请从你自己的设备游戏中导出（见 data/README.md）。",
+    "字段含义：",
+    "  ID                  词句 id（索引里的 id）",
+    "  Name                词句名",
+    "  Verse               词句正文，取第一个「。，、；：」之前作为首句匹配键",
+    "  PaiName             词牌名",
+    "  PoetIds             词人 id 列表，关联 SongCiPoetConfig.json",
+    "  UnlockNeedMinister  解锁条件；含 999 表示需特殊名臣，生成时会剔除"
+  ],
+  "dataList": [
+    {
+      "ID": 1,
+      "Name": "示例词句名",
+      "Verse": "示例首句，这里是词句正文的后续部分。",
+      "PaiName": "示例词牌",
+      "PoetIds": [1],
+      "UnlockNeedMinister": []
+    }
+  ]
+}

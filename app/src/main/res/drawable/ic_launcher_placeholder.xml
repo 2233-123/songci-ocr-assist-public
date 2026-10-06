@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 占位图标（词句库文本版权归游戏方，这里不使用任何游戏素材） -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path
+        android:fillColor="#FF0F3D2E"
+        android:pathData="M2,2h44v44h-44z" />
+    <path
+        android:fillColor="#FF00E5A0"
+        android:pathData="M13,11h22v3H13zM13,18h22v3H13zM13,25h14v3H13zM13,32h9v3H13z" />
+</vector>

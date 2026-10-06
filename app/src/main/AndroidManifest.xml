@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- 悬浮窗（在别的应用之上绘制） -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 前台服务：持有 MediaProjection，整局有效 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"
+        tools:targetApi="34" />
+    <!-- 13+ 前台服务常驻通知需要用户授权 -->
+    <uses-permission
+        android:name="android.permission.POST_NOTIFICATIONS"
+        tools:targetApi="33" />
+    <!-- 录制期间临时锁屏幕方向：Android 16 在方向变化时会停掉 MediaProjection，
+         游戏横屏 / 桌面竖屏来回切就会把投屏掐掉（实机日志已确认） -->
+    <uses-permission
+        android:name="android.permission.WRITE_SETTINGS"
+        tools:ignore="ProtectedPermissions" />
+
+    <!-- 录制屏幕只需要取帧，不申请 RECORD_AUDIO -->
+
+    <application
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@drawable/ic_launcher_placeholder"
+        android:label="@string/app_name"
+        android:localeConfig="@xml/locale_config"
+        android:roundIcon="@drawable/ic_launcher_round_placeholder"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.SongciAssist"
+        tools:ignore="UnusedAttribute"
+        tools:targetApi="34">
+
+        <!--
+            锁定横屏：游戏是横屏，本页也保持横屏，这样「授权 → 建投屏 → 切游戏」之间
+            屏幕方向不发生变化。Android 16 的内容录制实现会在**方向变化时直接停掉
+            MediaProjection**（实测日志：ROTATION_0 → ROTATION_90 后系统立即
+            "Stopped active MediaProjection and dispatching stop to callbacks"，
+            投屏只活了 790ms），所以这里必须避免旋转。
+        -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+            透明桥接页：悬浮球单击时用它拉起录屏授权，用户不用离开游戏，
+            屏幕方向也不会变化（方向一变 Android 16 就会停掉投屏）。
+        -->
+        <activity
+            android:name=".CaptureBridgeActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:screenOrientation="sensorLandscape"
+            android:theme="@style/Theme.SongciAssist.Transparent" />
+
+        <!-- 取帧前台服务：必须声明 mediaProjection 类型（Android 14 起强制） -->
+        <service
+            android:name=".CaptureService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
+
+        <!-- 悬浮窗服务：独立于取帧，保证停止取帧后高亮层也能干净退出 -->
+        <service
+            android:name=".OverlayService"
+            android:exported="false" />
+    </application>
+</manifest>

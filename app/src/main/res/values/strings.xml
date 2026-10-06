@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">宋词择律提示器</string>
+
+    <!-- 引导页 -->
+    <string name="intro_scope">读屏识别「（首句）」模式：识别屏幕上的词句首句，自动在正确词牌选项上画框。全离线，不联网。</string>
+    <string name="intro_disclaimer">第三方读屏辅助工具，不修改游戏数据、不注入游戏进程，与游戏开发/发行方无任何隶属关系。使用第三方辅助工具存在账号风险，风险自负。</string>
+
+    <!-- 权限卡片 -->
+    <string name="perm_overlay_title">1. 悬浮窗权限</string>
+    <string name="perm_overlay_desc">没有它就无法在游戏上画框。点击后到系统设置里允许「显示在其他应用上层」。</string>
+    <string name="perm_overlay_button">去授权</string>
+
+    <string name="perm_notification_title">2. 通知权限（Android 13+）</string>
+    <string name="perm_notification_desc">取帧服务需要常驻通知（通知里带「停止」按钮）。</string>
+    <string name="perm_notification_button">去授权</string>
+
+    <string name="perm_capture_title">3. 屏幕录制授权</string>
+    <string name="perm_capture_desc">由前台服务持有，整局有效。**强烈建议在游戏里直接点悬浮球开始**（不用切窗口：切窗口会改变屏幕方向，而 Android 16 一旦方向变化就会停掉投屏）。</string>
+    <string name="perm_capture_button">现在授权并开始</string>
+
+    <string name="perm_battery_title">4. 忽略电池优化（建议）</string>
+    <string name="perm_battery_desc">否则长时间在后台可能被系统掐断。小米/华为/OPPO 还需在「自启动/后台白名单」里放行本应用。</string>
+    <string name="perm_battery_hint">未设置（可选）</string>
+    <string name="perm_battery_button">去设置</string>
+    <string name="battery_already_ok">已经在忽略电池优化名单里 ✓</string>
+
+    <string name="perm_rotation_title">5. 修改系统设置（锁屏幕方向）</string>
+    <string name="perm_rotation_desc">重要：Android 16 在屏幕方向变化时会直接停掉录屏。游戏是横屏、桌面是竖屏，切一次窗口投屏就被回收（永远收不到帧）。授予这项权限后，录制期间会自动把方向锁成横屏，停止时恢复你原来的设置。</string>
+    <string name="perm_rotation_button">去授权</string>
+    <string name="perm_rotation_manual">请到：设置 → 应用 → 宋词择律提示器 → 修改系统设置，手动允许</string>
+
+    <string name="perm_state_granted">状态：已授权 ✓</string>
+    <string name="perm_state_denied">状态：未授权 ✗</string>
+    <string name="perm_state_unknown">状态：未开始</string>
+    <string name="perm_state_requesting">状态：已授权，正在启动取帧…</string>
+
+    <!-- 取帧链路状态（引导页显示，避免静默失败） -->
+    <string name="cap_state_connecting">取帧：正在连接投屏服务…</string>
+    <string name="cap_state_running">取帧：运行中 %1$dx%2$d ✓（悬浮球：单击暂停 / 拖动移动 / 长按退出）</string>
+    <string name="cap_state_idle_hint">取帧：未开始。在游戏里点一下悬浮球即可开始（不用切窗口）</string>
+    <string name="cap_state_failed">取帧启动失败：%1$s（可点「开始」重试；仍失败请把这条信息发我）</string>
+    <string name="cap_state_stopped">取帧：已停止（在系统通知里点了停止，或系统回收了投屏）</string>
+    <string name="need_overlay_first">请先授予「悬浮窗权限」，否则无法显示提示框</string>
+
+    <!-- 状态 -->
+    <string name="state_stopped">未运行。先完成上面 1、2、5 三项授权，再点「开始」；或在游戏里直接点悬浮球开始。</string>
+    <string name="state_running">运行中：悬浮球单击暂停/继续，拖动移动，长按停止退出。</string>
+    <string name="state_index_summary">词句索引已加载：%1$d 条 / %2$d 个词牌</string>
+    <string name="state_index_loading">词句索引加载中…（错误：%1$s）</string>
+    <string name="pref_show_status_bar">显示顶部状态条（关掉只留高亮框）</string>
+    <string name="pref_debug">调试面板（排查为什么没出框）</string>
+    <string name="pref_debug_hint">打开后：屏幕中部会浮一个面板，同时**本页下方**也会显示最近一帧的 OCR 结果——后者不依赖悬浮层，悬浮层画不出来时看这里。切回游戏几秒后再切回本页即可看到。</string>
+    <string name="diag_empty">诊断：还没有数据。点「开始」并回到游戏待几秒，再切回本页。</string>
+    <string name="diag_no_frame">诊断：取帧服务已停止，还没收到任何一帧。\n停止原因：%1$s\n\n常见原因：切后台/锁屏被系统回收、分屏里启动、在通知栏点了「停止」、其它 App 抢占投屏。点「开始」重试。\n\n点下面的「查看事件日志」可以看到完整的时间线。</string>
+    <string name="diag_show_log">查看事件日志（排查投屏为什么被回收）</string>
+    <string name="diag_no_log">事件日志：空。点「开始」走一遍再回来看。</string>
+    <string name="manual_checklist_hint">真机自测清单见 README「真机手测清单」。若框没出现：打开上面的调试面板，先看「顶部 OCR」读到了什么。</string>
+
+    <!-- 通知 -->
+    <string name="notif_channel_name">读屏取帧</string>
+    <string name="notif_channel_desc">取帧前台服务的常驻通知</string>
+    <string name="notif_title">宋词择律提示器</string>
+    <string name="notif_capturing">正在读屏识别中</string>
+    <string name="notif_stopped">已停止，点此重新开始</string>
+    <string name="action_stop">停止</string>
+    <string name="action_start">开始录屏</string>
+    <string name="action_show_ball">显示悬浮球</string>
+    <string name="ball_shown_hint">悬浮球已出现。请切到游戏，停在择律页后在游戏里点一下悬浮球开始取帧。</string>
+    <string name="state_ball_only">等待开始：悬浮球已就绪。**请在游戏里点悬浮球**开始取帧（这样从第一帧起捕获的就是游戏画面）。</string>
+    <string name="notif_action_stop">停止投屏</string>
+
+    <!-- 悬浮层状态条 -->
+    <string name="status_hit_format">%1$s → %2$s ✓ %3$.2f</string>
+    <string name="status_pai_only_format">应选：%1$s（屏上没找到选项气泡）</string>
+
+    <!-- 退出确认 -->
+    <string name="quit_title">退出提示器</string>
+    <string name="quit_message">将停止读屏并移除悬浮窗。</string>
+    <string name="quit_confirm">退出</string>
+    <string name="quit_cancel">取消</string>
+</resources>

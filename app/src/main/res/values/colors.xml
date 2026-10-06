@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 状态色：与设计文档「引导页标红」一致 -->
+    <color name="ok">#FF12B76A</color>
+    <color name="bad">#FFE5484D</color>
+    <color name="dim">#FF6B7280</color>
+    <!-- 卡片底色（浅色主题用浅灰，深色主题见 values-night/colors.xml） -->
+    <color name="card">#FFF3F4F6</color>
+    <color name="highlight">#FF00E5A0</color>
+    <color name="status_bar">#CC000000</color>
+</resources>

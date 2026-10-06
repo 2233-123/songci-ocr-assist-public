@@ -1,0 +1,54 @@
+# Android / Gradle
+.gradle/
+build/
+local.properties
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# keystore 与口令 —— 绝不入库
+keystore.properties
+
+# 例外：debug 用的自签 keystore（口令固定为 android，仅用于本地调试安装，
+# 不用于分发；入库是为了让 assembleDebug 在任何机器上都能出可安装包）
+!debug.jks
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Python / 临时
+__pycache__/
+_probe/
+_probe_tmp/
+__probe*
+
+# 本机 DSH 沙箱权限修复留下的回滚记录（含机器路径与权限备份，不入库）
+.dsh-acl-recovery/
+
+# ---------------------------------------------------------------------------
+# 游戏数据 —— 不随仓库分发
+# ---------------------------------------------------------------------------
+# data/ 下是游戏导出的配置 JSON（SongCiVerseConfig / SongCiPoetConfig），
+# 属于游戏素材，本仓库不分发。要重新生成索引请自行从自己的设备导出，
+# 放进 data/（格式说明见 data/README.md）。
+#
+# 注意：已生成并提交的 app/src/main/assets/verses.json 保留 ——
+# 它是很小的数据投影（首句 → 词牌 → 词人姓名，约 20 KB），App 运行必需。
+data/*.json
+!data/README.md
+!data/*.example.json
+
+# 本地验证用的临时工作区 / 工具链（体积大，不入库；重新下载即可）
+.build-workspace/
+.android-sdk/
+.jdk17/
+.gradle-8.7/
+.gradle-home/
+.jtmp/
+zzz_fresh/
