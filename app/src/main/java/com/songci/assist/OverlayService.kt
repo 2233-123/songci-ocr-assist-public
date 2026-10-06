@@ -75,6 +75,8 @@ class OverlayService : Service() {
         Runnable {
             lastOutcome = null
             overlayView?.clear()
+            // 内容清空 → 窗口收成 0×0，屏幕上不留任何遮挡
+            applyOverlayLayout()
         }
     }
 
@@ -116,14 +118,19 @@ class OverlayService : Service() {
                 showStatusBar = this@OverlayService.showStatusBar
                 debugMode = this@OverlayService.debugMode
             }
+            // **不用全屏窗口**：窗口尺寸先给 0，等有内容时再按内容包围盒调整。
+            //
+            // 早期是 MATCH_PARENT 全屏窗（虽然带 FLAG_NOT_TOUCHABLE），但实测在
+            // 华为 HarmonyOS 上会让下层游戏收不到点击 —— 改为「按内容定尺寸的窄窗口」，
+            // 从根源上规避 OEM 的触摸遮挡判定（详见 OverlayView 类注释）。
             val params = WindowManager.LayoutParams(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.MATCH_PARENT,
+                0,
+                0,
                 overlayType(),
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT,
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
@@ -131,6 +138,8 @@ class OverlayService : Service() {
             windowManager.addView(view, params)
             overlayView = view
             overlayParams = params
+            // 初始没有内容 → 让窗口收成 0×0，屏幕上不留任何遮挡
+            applyOverlayLayout()
         }
 
         if (ballView == null) {
@@ -165,6 +174,41 @@ class OverlayService : Service() {
             @Suppress("DEPRECATION")
             WindowManager.LayoutParams.TYPE_PHONE
         }
+
+    /**
+     * 按「当前要画的内容」调整高亮层窗口的位置与尺寸。
+     *
+     * 没有内容时窗口收成 **0×0** —— 屏幕上完全没有我们的窗口，也就不可能遮挡任何东西。
+     * 有内容时窗口只覆盖内容包围盒（框 / 状态条 / 调试面板）外扩一点。
+     *
+     * 这是「不在全屏覆盖」这条原则的落地点：即使某个 ROM 不尊重
+     * `FLAG_NOT_TOUCHABLE`，被挡住的也只是那一小块，不会让整个游戏的按钮失灵。
+     */
+    private fun applyOverlayLayout() {
+        val view = overlayView ?: return
+        val params = overlayParams ?: return
+        if (destroyed) return
+
+        val metrics = resources.displayMetrics
+        val screenW = metrics.widthPixels
+        val screenH = metrics.heightPixels
+        val padding = (OVERLAY_WINDOW_PADDING_DP * metrics.density).roundToInt()
+        val layout = OverlayView.layoutFor(view.contentBoundsPx(), screenW, screenH, padding)
+
+        view.applyLayout(layout)
+        if (params.width == layout.width &&
+            params.height == layout.height &&
+            params.x == layout.x &&
+            params.y == layout.y
+        ) {
+            return
+        }
+        params.width = layout.width
+        params.height = layout.height
+        params.x = layout.x
+        params.y = layout.y
+        safeUpdate(view, params)
+    }
 
     override fun onDestroy() {
         destroyed = true
@@ -232,9 +276,11 @@ class OverlayService : Service() {
                 if (dbg) {
                     view.highlight = null
                     view.statusText = null
+                    applyOverlayLayout()
                     main.postDelayed(clearRunnable, DEBUG_TTL_MS)
                 } else {
                     view.clear()
+                    applyOverlayLayout()
                 }
                 return
             }
@@ -250,6 +296,8 @@ class OverlayService : Service() {
                 view.showStatusBar = showStatusBar
                 view.highlight = (outcome as? FrameOutcome.Hit)?.target
                 view.statusText = statusTextOf(outcome)
+                // 内容变了 → 重新贴合窗口
+                applyOverlayLayout()
                 main.removeCallbacks(clearRunnable)
                 // 连续无命中（例如已经选完）→ 淡出
                 main.postDelayed(clearRunnable, if (dbg) DEBUG_TTL_MS else Config.HIGHLIGHT_TTL_MS)
@@ -441,6 +489,13 @@ class OverlayService : Service() {
 
         /** 调试面板的存活时间（比正常高亮长，方便看清） */
         private const val DEBUG_TTL_MS = 1_200L
+
+        /**
+         * 高亮层窗口在内容包围盒外扩多少 dp。
+         *
+         * 留一点余量，避免描边（以及抗锯齿）被窗口边缘裁掉。
+         */
+        private const val OVERLAY_WINDOW_PADDING_DP = 8f
 
         /** 是否开启调试面板（[CaptureService] 据此决定要不要每帧算诊断） */
         fun isDebugEnabled(context: Context): Boolean =
