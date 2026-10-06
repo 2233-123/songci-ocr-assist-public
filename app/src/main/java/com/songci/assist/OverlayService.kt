@@ -38,6 +38,10 @@ class OverlayService : Service() {
     private var ballView: FloatingBallView? = null
     private var ballParams: WindowManager.LayoutParams? = null
 
+    /** 状态条（"应选：X"）单独一个**固定位置**的窗口，见 [applyStatusLayout] */
+    private var statusView: StatusBarView? = null
+    private var statusParams: WindowManager.LayoutParams? = null
+
     /** 暂停：不再画高亮/状态条，浮层仍然存在。 */
     @Volatile
     var paused: Boolean = false
@@ -48,7 +52,8 @@ class OverlayService : Service() {
         get() = prefs.getBoolean(PREF_SHOW_STATUS, true)
         set(value) {
             prefs.edit().putBoolean(PREF_SHOW_STATUS, value).apply()
-            overlayView?.showStatusBar = value
+            statusView?.barEnabled = value
+            applyStatusLayout()
         }
 
     /** 调试面板开关（偏好持久化；排查「为什么没出框」）。 */
@@ -75,6 +80,7 @@ class OverlayService : Service() {
         Runnable {
             lastOutcome = null
             overlayView?.clear()
+            setStatusText(null)
             // 内容清空 → 窗口收成 0×0，屏幕上不留任何遮挡
             applyOverlayLayout()
         }
@@ -115,7 +121,6 @@ class OverlayService : Service() {
     private fun show() {
         if (overlayView == null) {
             val view = OverlayView(this).apply {
-                showStatusBar = this@OverlayService.showStatusBar
                 debugMode = this@OverlayService.debugMode
             }
             // **不用全屏窗口**：窗口尺寸先给 0，等有内容时再按内容包围盒调整。
@@ -140,6 +145,29 @@ class OverlayService : Service() {
             overlayParams = params
             // 初始没有内容 → 让窗口收成 0×0，屏幕上不留任何遮挡
             applyOverlayLayout()
+        }
+
+        if (statusView == null) {
+            val status = StatusBarView(this)
+            // **固定位置**的状态条窗口：宽度整屏、位置恒为屏幕顶部正中。
+            // 不做成随内容移动的窗口，否则高亮框一动它就跟着动（用户反馈过）。
+            // 虽然铺满屏幕宽度，但带 FLAG_NOT_TOUCHABLE（可触摸区域为空），不挡游戏。
+            val params = WindowManager.LayoutParams(
+                0,
+                0,
+                overlayType(),
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT,
+            ).apply {
+                gravity = Gravity.TOP or Gravity.START
+            }
+            windowManager.addView(status, params)
+            statusView = status
+            statusParams = params
+            applyStatusLayout()
         }
 
         if (ballView == null) {
@@ -179,10 +207,13 @@ class OverlayService : Service() {
      * 按「当前要画的内容」调整高亮层窗口的位置与尺寸。
      *
      * 没有内容时窗口收成 **0×0** —— 屏幕上完全没有我们的窗口，也就不可能遮挡任何东西。
-     * 有内容时窗口只覆盖内容包围盒（框 / 状态条 / 调试面板）外扩一点。
+     * 有内容时窗口只覆盖内容包围盒（框 / 调试面板）外扩一点。
      *
      * 这是「不在全屏覆盖」这条原则的落地点：即使某个 ROM 不尊重
      * `FLAG_NOT_TOUCHABLE`，被挡住的也只是那一小块，不会让整个游戏的按钮失灵。
+     *
+     * 注意**状态条不在这里** —— 它有自己的固定窗口（见 [applyStatusLayout]），
+     * 否则会被高亮框的位置带着动。
      */
     private fun applyOverlayLayout() {
         val view = overlayView ?: return
@@ -210,16 +241,48 @@ class OverlayService : Service() {
         safeUpdate(view, params)
     }
 
+    /**
+     * 状态条窗口：**永远钉在屏幕顶部正中，宽度铺满屏幕、高度按内容自适应**。
+     *
+     * 为什么单独一个窗口：之前状态条和高亮框共用一个窗口，而那个窗口的位置是两者
+     * 包围盒的**并集**，于是高亮框一移动、状态条在屏幕上就跟着跑
+     * （用户反馈"顶部的框会动来动去"）。拆开后窗口位置只由分辨率决定，
+     * 高亮框再怎么动都不会影响它。
+     */
+    private fun applyStatusLayout() {
+        val view = statusView ?: return
+        val params = statusParams ?: return
+        if (destroyed) return
+
+        val screenW = resources.displayMetrics.widthPixels
+        if (screenW <= 0) return
+        val height = view.statusWindowHeightPx()
+
+        if (params.width == screenW && params.height == height &&
+            params.x == 0 && params.y == 0
+        ) {
+            return
+        }
+        params.width = screenW
+        params.height = height
+        params.x = 0
+        params.y = 0
+        safeUpdate(view, params)
+    }
+
     override fun onDestroy() {
         destroyed = true
         main.removeCallbacks(clearRunnable)
         main.removeCallbacks(quitRunnable)
         overlayView?.let { runCatching { windowManager.removeView(it) } }
+        statusView?.let { runCatching { windowManager.removeView(it) } }
         ballView?.let { runCatching { windowManager.removeView(it) } }
         overlayView = null
+        statusView = null
         ballView = null
         ballParams = null
         overlayParams = null
+        statusParams = null
         if (instance === this) instance = null
         super.onDestroy()
     }
@@ -275,11 +338,12 @@ class OverlayService : Service() {
                 // 调试模式下保留诊断文本，否则「没命中」时面板会一闪就没，看不到原因
                 if (dbg) {
                     view.highlight = null
-                    view.statusText = null
+                    setStatusText(null)
                     applyOverlayLayout()
                     main.postDelayed(clearRunnable, DEBUG_TTL_MS)
                 } else {
                     view.clear()
+                    setStatusText(null)
                     applyOverlayLayout()
                 }
                 return
@@ -293,16 +357,29 @@ class OverlayService : Service() {
                     return
                 }
                 lastOutcome = outcome
-                view.showStatusBar = showStatusBar
                 view.highlight = (outcome as? FrameOutcome.Hit)?.target
-                view.statusText = statusTextOf(outcome)
-                // 内容变了 → 重新贴合窗口
+                setStatusText(statusTextOf(outcome))
+                // 内容变了 → 重新贴合窗口（状态条窗口位置固定，只可能变高度）
                 applyOverlayLayout()
                 main.removeCallbacks(clearRunnable)
                 // 连续无命中（例如已经选完）→ 淡出
                 main.postDelayed(clearRunnable, if (dbg) DEBUG_TTL_MS else Config.HIGHLIGHT_TTL_MS)
             }
         }
+    }
+
+    /**
+     * 更新顶部状态条。
+     *
+     * 状态条在**独立窗口**里（见 [StatusBarView]），窗口位置固定、只在文案变化时
+     * 调整高度，因此它不会像以前那样被高亮框的位置带着来回移动。
+     */
+    private fun setStatusText(text: String?) {
+        val view = statusView ?: return
+        view.barEnabled = showStatusBar
+        view.paused = paused
+        view.text = text
+        applyStatusLayout()
     }
 
     private fun statusTextOf(outcome: FrameOutcome): String = when (outcome) {
@@ -419,6 +496,7 @@ class OverlayService : Service() {
         overlayView?.paused = paused
         if (paused) {
             overlayView?.clear()
+            setStatusText(null)
         } else {
             lastOutcome = null
         }

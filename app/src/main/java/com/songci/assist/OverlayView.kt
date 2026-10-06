@@ -62,22 +62,6 @@ class OverlayView(context: Context) : View(context) {
             invalidate()
         }
 
-    /** 顶部状态条文案（"首句 → 词牌 ✓0.98" / "应选：西江月"）。null = 不显示。 */
-    var statusText: String? = null
-        set(value) {
-            if (field == value) return
-            field = value
-            invalidate()
-        }
-
-    /** 偏好里可以关掉状态条（只留高亮框）。 */
-    var showStatusBar: Boolean = true
-        set(value) {
-            if (field == value) return
-            field = value
-            invalidate()
-        }
-
     /** 暂停时只留浮层，不画任何提示。 */
     var paused: Boolean = false
         set(value) {
@@ -104,7 +88,6 @@ class OverlayView(context: Context) : View(context) {
 
     fun clear() {
         highlight = null
-        statusText = null
     }
 
     private val density = resources.displayMetrics.density
@@ -144,16 +127,6 @@ class OverlayView(context: Context) : View(context) {
         color = HIGHLIGHT_COLOR
     }
 
-    private val statusBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
-        color = STATUS_BG_COLOR
-    }
-
-    private val statusTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        textSize = dp(15f)
-    }
-
     private val debugBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
         color = DEBUG_BG_COLOR
@@ -176,9 +149,6 @@ class OverlayView(context: Context) : View(context) {
         canvas.translate(originX.toFloat(), originY.toFloat())
 
         highlight?.let { drawHighlight(canvas, it) }
-        if (showStatusBar) {
-            statusText?.takeIf { it.isNotBlank() }?.let { drawStatus(canvas, it) }
-        }
         if (debugMode && debugLines.isNotEmpty()) {
             drawDebug(canvas, debugLines)
         }
@@ -199,9 +169,6 @@ class OverlayView(context: Context) : View(context) {
 
         highlight?.let { box = union(box, highlightRectPx(it)) }
 
-        if (showStatusBar) {
-            statusText?.takeIf { it.isNotBlank() }?.let { box = union(box, statusRectPx(it)) }
-        }
         if (debugMode && debugLines.isNotEmpty()) {
             box = union(box, debugRectPx(debugLines))
         }
@@ -226,19 +193,6 @@ class OverlayView(context: Context) : View(context) {
         // 箭头在框左侧，最远伸出 18dp
         box.left = minOf(box.left, (box.left - dp(ARROW_REACH_DP)).coerceAtLeast(0f))
         return box
-    }
-
-    /** 状态条在屏幕坐标下的矩形 */
-    private fun statusRectPx(text: String): RectF {
-        val padH = dp(12f)
-        val padV = dp(7f)
-        val textWidth = statusTextPaint.measureText(text)
-        val fm = statusTextPaint.fontMetrics
-        val boxW = textWidth + padH * 2
-        val boxH = (fm.bottom - fm.top) + padV * 2
-        val left = (contentW - boxW) / 2f
-        val top = dp(STATUS_TOP_DP)
-        return RectF(left, top, left + boxW, top + boxH)
     }
 
     /** 调试面板在屏幕坐标下的矩形 */
@@ -299,36 +253,15 @@ class OverlayView(context: Context) : View(context) {
         canvas.drawPath(arrowPath, arrowPaint)
     }
 
-    private fun drawStatus(canvas: Canvas, text: String) {
-        val padH = dp(12f)
-        val padV = dp(7f)
-        val textWidth = statusTextPaint.measureText(text)
-        val fm = statusTextPaint.fontMetrics
-        val boxW = textWidth + padH * 2
-        val boxH = (fm.bottom - fm.top) + padV * 2
-        val left = (contentW - boxW) / 2f
-        val top = dp(STATUS_TOP_DP)
-        if (left < 0f || top + boxH > contentH) return
-
-        rectF.set(left, top, left + boxW, top + boxH)
-        val radius = dp(12f)
-        canvas.drawRoundRect(rectF, radius, radius, statusBgPaint)
-        canvas.drawText(text, left + padH, top + padV - fm.top, statusTextPaint)
-    }
-
     companion object {
         /** 亮青绿：与游戏 UI 区分度高 */
         private const val HIGHLIGHT_COLOR = 0xFF00E5A0.toInt()
-        private const val STATUS_BG_COLOR = 0xCC000000.toInt()
 
-        /** 调试面板底色（比状态条更实，保证小字可读） */
+        /** 调试面板底色（比高亮框更实，保证小字可读） */
         private const val DEBUG_BG_COLOR = 0xE6101820.toInt()
 
         /** 箭头向左伸出多少 dp（用于算窗口左边界） */
         private const val ARROW_REACH_DP = 20f
-
-        /** 状态条距屏幕顶部多少 dp */
-        private const val STATUS_TOP_DP = 28f
 
         /** 调试面板在屏幕高度上的位置比例 */
         private const val DEBUG_TOP_RATIO = 0.45f
