@@ -66,4 +66,18 @@ object Fixtures {
         TextBlock.normalized("清风半夜鸣蝉", 0.08f, 0.17f, 0.92f, 0.22f),
         TextBlock.normalized("七八个星天外", 0.08f, 0.23f, 0.92f, 0.28f),
     )
+
+    // ------------------------------------------------------------------ 效果表
+
+    private val cachedEffects: EffectIndex by lazy { EffectIndex.fromJson(loadEffectsJson()) }
+
+    /** 词句效果表（`effects.json`，随包发布）。 */
+    fun effects(): EffectIndex = cachedEffects
+
+    /** 从 classpath 读 effects.json（构建脚本把 src/main/assets 挂进了 test resources）。 */
+    fun loadEffectsJson(): String {
+        val stream = Fixtures::class.java.classLoader!!.getResourceAsStream(EffectIndex.ASSET_NAME)
+            ?: error("classpath 里没有 ${EffectIndex.ASSET_NAME}（检查 test resources 配置）")
+        return stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+    }
 }

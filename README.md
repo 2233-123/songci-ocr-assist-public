@@ -90,6 +90,7 @@
 
 | 版本 | 修了什么 |
 |---|---|
+| **0.11.0** | **新增「词句效果」显示**：认出首句后，顶部状态条下方显示这首词会给的效果（如 `军心+4 ｜ 战斗力+2`）。**不显示「词元」**；只认到首句就显示，不必等气泡 |
 | **0.10.1** | **短首句错 2 字就整句废掉**：`甚矣吾衰矣`（5 字）被读成 `甚美吾衰吴`，相似度只有 0.600（阈值 0.72）。把**形近等价**从"气泡"扩展到**首句**，并新增 `矣/美/吴`、`衰/哀` 两组 |
 | **0.10.0** | 诊断日志加上 x 坐标（用于定位「最左边的选项文字常读不到」） |
 | **0.9.9** | **形近字误读导致某些词牌慢**：`丑奴儿` 被读成 `卫奴儿`/`卫奴几`、`鹧鸪天` 被读成 `鹤鸽天`。改为**逐位形近等价**比较（3 字词牌错 1 字相似度只有 0.667，而阈值 0.66 —— 只差 0.007，所以错 2 字必然失败） |
@@ -123,8 +124,25 @@
    - 在画面上部找到**首句**，用编辑距离相似度去索引里查最接近的词
    - 查到的词带来一个**词牌名**，再在画面中部找到写着这个名字的选项气泡
 4. **画框** —— 用悬浮窗在那个气泡上画一个高亮框
+5. **报效果** —— 认出首句的同时，在顶部状态条下方显示**这首词会给哪些效果**
 
 索引里有 **99 条词句 / 40 个词牌**，随包提供、离线查表。
+
+### 词句效果怎么显示
+
+认出首句后，顶部会出现两行：
+
+```
+应选：贺新郎（屏上没找到选项气泡）
+军心+4 ｜ 战斗力+2
+```
+
+- **只认到首句就显示**，不必等找到气泡（词牌定了，效果就定了）
+- 显示形式是**名称 + 数值**；负数是减少，例如 `腐化-4` 表示降低腐化（是好事）
+- **不显示「词元」**（加词元的效果一律不报）
+- 效果挂在**整条词句**上（游戏数据本身不按句拆分），所以「这句的效果」= 这首词的效果
+
+数值来源：游戏配置的 `EffectTypeList`（效果种类）+ `EffectParamList`（数值）。
 
 ### 匹配的准确度（可复算）
 
@@ -186,7 +204,8 @@ python tools/verify_all.py       # 一键自检：索引校验 + 匹配复算 + 
 │   ├── README.md                #   格式说明 + 如何自备数据
 │   └── *.example.json           #   结构骨架（不含真实词句）
 ├── tools/                       # 纯 Python 标准库，无第三方依赖
-│   ├── gen_verse_index.py       #   生成 + 校验 verses.json（唯一需要 data/ 的脚本）
+│   ├── gen_verse_index.py       #   生成 + 校验 verses.json（需要 data/）
+│   ├── gen_effect_index.py      #   生成 effects.json（需要 data/ 与效果表）
 │   ├── tune_matcher.py          #   匹配复算 / 阈值调参（与 Kotlin 同式）
 │   ├── verify_all.py            #   一键自检
 │   ├── check_index_committed.py #   CI：索引必须与提交版本一致
@@ -195,6 +214,7 @@ python tools/verify_all.py       # 一键自检：索引校验 + 匹配复算 + 
 └── app/src/main/
     ├── AndroidManifest.xml
     ├── assets/verses.json       # 词句索引
+    ├── assets/effects.json      # 词句 → 效果（生成物，随包）
     └── java/com/songci/assist/
         ├── MainActivity.kt            # 引导页：授权 + 开始/停止 + 状态 + 导出日志
         ├── CaptureBridgeActivity.kt   # 透明桥接页，拉起系统录屏授权
@@ -205,9 +225,10 @@ python tools/verify_all.py       # 一键自检：索引校验 + 匹配复算 + 
         ├── PipelineHolder.kt          # 让悬浮层能把自己的绘制区域告知流水线
         ├── Matcher.kt                 # 两段式匹配（纯函数，单测覆盖）
         ├── VerseIndex.kt              # 索引加载、查表、形近字等价
+        ├── EffectIndex.kt             # 词句效果查表
         ├── OverlayService.kt          # 悬浮窗生命周期（高亮层 + 状态条 + 悬浮球）
         ├── OverlayView.kt             # 画高亮框
-        ├── StatusBarView.kt           # 顶部「应选：X」状态条（独立固定窗口）
+        ├── StatusBarView.kt           # 顶部「应选：X」状态条 + 效果副行
         ├── FloatingBallView.kt        # 悬浮球
         ├── EventLog.kt               # 帧计时 / 事件环形缓冲 + 导出
         ├── Config.kt                  # 全部可调参数
@@ -263,7 +284,7 @@ python tools/verify_all.py       # 一键自检：索引校验 + 匹配复算 + 
 
 ### 测试
 
-- **136 个 JVM 单元测试**（`./gradlew testDebugUnitTest`），无需设备
+- **147 个 JVM 单元测试**（`./gradlew testDebugUnitTest`），无需设备
   - `MatcherTest` / `MatcherEdgeTest` / `MatcherNoiseTest`：匹配算法与噪声场景
   - `RealFrameMatchTest` / `LiveFrameProbe`：用**真机实收的 OCR 块**构造，锁定整条匹配链路
   - `HeadPrefixMatchTest`：首句分批渐显时的短前缀匹配（修「一曲新词酒一杯」那个 bug）

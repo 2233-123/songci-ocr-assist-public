@@ -55,6 +55,8 @@ sealed interface FrameOutcome {
         val pai: String,
         val headText: String,
         val similarity: Double,
+        /** 该词句的效果（不含「词元」）；空 = 没有数据 */
+        val effects: List<PaiEffect> = emptyList(),
     ) : FrameOutcome
 
     /** 命中并在屏上定位到气泡。 */
@@ -63,6 +65,8 @@ sealed interface FrameOutcome {
         val headText: String,
         val similarity: Double,
         val target: HighlightRect,   // HighlightRect 是 data class，因此 Hit 可比较
+        /** 该词句的效果（不含「词元」）；空 = 没有数据 */
+        val effects: List<PaiEffect> = emptyList(),
     ) : FrameOutcome
 }
 
@@ -82,6 +86,12 @@ class FramePipeline(
     private val ocr: OcrEngine,
     /** 词句索引；索引是异步加载的，所以用取值函数而不是构造期固定值 */
     private val index: () -> VerseIndex?,
+    /**
+     * 词句效果表；同样是异步加载、可选。
+     *
+     * 拿不到（未加载完 / 文件缺失）时效果列表为空 —— **只是不显示效果，不影响出框**。
+     */
+    private val effects: (() -> EffectIndex?)? = null,
     /** 允许注入的时钟（单测里手动推进）。默认单调时钟，与 Android 侧同一时间基。 */
     private val clock: () -> Long = { SystemClock.elapsedRealtime() },
 ) {
@@ -118,6 +128,16 @@ class FramePipeline(
     /** 上一帧是否命中过（用于命中结束后补发一次 NoMatch，让高亮及时清掉）。 */
     @Volatile
     private var lastFrameHit: Boolean = false
+
+    /**
+     * 最近一次 [matchNow] 的**结论对象**（单测用）。
+     *
+     * `matchNow` 的签名是返回一行诊断文本，测试拿不到带 `effects` 的 `FrameOutcome`，
+     * 所以这里留一个只读出口。生产代码不读它。
+     */
+    @Volatile
+    var lastOutcomeForTest: FrameOutcome? = null
+        private set
 
     /**
      * **App 自己绘制在屏幕上的区域**（归一化坐标 0..1，与 [TextBlock] 同基准）。
@@ -326,6 +346,8 @@ class FramePipeline(
         val verseIndex = index() ?: return "索引未加载"
         val inCooldown = !debug && !shouldRunOptionsStage(frameAt)
         val evaluated = evaluateInternal(blocks, frameAt, inCooldown)
+        // 单测用出口：本方法只返回一行诊断文本，拿不到带 `effects` 的 FrameOutcome
+        lastOutcomeForTest = evaluated.outcome
         // 同步路径也要推进冷却/省电状态，否则行为与异步路径不一致
         when (val outcome = evaluated.outcome) {
             is FrameOutcome.Empty, is FrameOutcome.NoMatch -> noteNoHit()
@@ -461,9 +483,13 @@ class FramePipeline(
                         }}",
                 )
             }
-            FrameOutcome.PaiOnly(head.verse.pai, head.matchedText, head.similarity)
+            FrameOutcome.PaiOnly(
+                head.verse.pai, head.matchedText, head.similarity, paiEffectsOf(head.verse),
+            )
         } else {
-            FrameOutcome.Hit(head.verse.pai, head.matchedText, head.similarity, target)
+            FrameOutcome.Hit(
+                head.verse.pai, head.matchedText, head.similarity, target, paiEffectsOf(head.verse),
+            )
         }
         cachedOutcome = outcome
         cachedVerseId = head.verse.id
@@ -474,6 +500,15 @@ class FramePipeline(
     /** 日志用：把本帧文本拼成一行，便于对照真机 OCR 结果。 */
     fun summarize(blocks: List<TextBlock>): String =
         blocks.joinToString(" | ") { VerseIndex.normalize(it.text) }
+
+    /**
+     * 取该词句的效果（不含「词元」）。
+     *
+     * 用 `verse.head` 作 key —— 效果表就是按索引首句字面量写的，
+     * 而索引 `head` 本身已是规范化形式，所以是直接等值查表（由 `EffectIndexTest` 守护）。
+     */
+    private fun paiEffectsOf(verse: Verse): List<PaiEffect> =
+        effects?.invoke()?.forHead(verse.head).orEmpty()
 
     fun shutdown() {
         listener = null

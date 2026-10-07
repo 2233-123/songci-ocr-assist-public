@@ -448,7 +448,7 @@ class OverlayService : Service() {
                 }
                 lastOutcome = outcome
                 view.highlight = (outcome as? FrameOutcome.Hit)?.target
-                setStatusText(statusTextOf(outcome))
+                setStatusText(statusTextOf(outcome), statusSubTextOf(outcome))
                 // 内容变了 → 重新贴合窗口（状态条窗口位置固定，只可能变高度）
                 applyOverlayLayout()
                 main.removeCallbacks(clearRunnable)
@@ -465,10 +465,21 @@ class OverlayService : Service() {
      * 调整高度，因此它不会像以前那样被高亮框的位置带着来回移动。
      */
     private fun setStatusText(text: String?) {
+        setStatusText(text, null)
+    }
+
+    /**
+     * 更新顶部状态条（主行 + 可选的**词句效果**副行）。
+     *
+     * 状态条在**独立窗口**里（见 [StatusBarView]），窗口位置固定、只在文案变化时
+     * 调整高度，因此它不会像以前那样被高亮框的位置带着来回移动。
+     */
+    private fun setStatusText(text: String?, sub: String?) {
         val view = statusView ?: return
         view.barEnabled = showStatusBar
         view.paused = paused
         view.text = text
+        view.subText = sub
         applyStatusLayout()
     }
 
@@ -482,6 +493,24 @@ class OverlayService : Service() {
 
         is FrameOutcome.PaiOnly -> context.getString(R.string.status_pai_only_format, outcome.pai)
         else -> ""
+    }
+
+    /**
+     * 效果副行文案：`民心-10 ｜ 战斗力+10`。
+     *
+     * 口径（用户确认）：
+     * - **不显示「词元」** —— 这一步在生成期就排掉了（effects.json 里根本不含词元）
+     * - 显示形式为**名称+数值**，不做游戏原味描述
+     * - 只认到首句（`PaiOnly`）也要显示 —— 不必等找到气泡
+     */
+    private fun statusSubTextOf(outcome: FrameOutcome): String? {
+        val effects = when (outcome) {
+            is FrameOutcome.Hit -> outcome.effects
+            is FrameOutcome.PaiOnly -> outcome.effects
+            else -> emptyList()
+        }
+        if (effects.isEmpty()) return null
+        return effects.joinToString(EFFECT_SEPARATOR) { it.label() }
     }
 
     /**
@@ -695,6 +724,9 @@ class OverlayService : Service() {
 
         /** 一帧结论超过这个时长才送达就不画了（切换页面时防误报） */
         private const val STALE_FRAME_MS = 1_500L
+
+        /** 效果副行里多条效果的分隔符 */
+        private const val EFFECT_SEPARATOR = " ｜ "
 
         /** 调试面板的存活时间（比正常高亮长，方便看清） */
         private const val DEBUG_TTL_MS = 1_200L

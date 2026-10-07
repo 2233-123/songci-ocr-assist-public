@@ -367,6 +367,8 @@ class CaptureService : Service() {
         pipeline = FramePipeline(
             ocr = MlKitOcrEngine().also { ocrEngine = it },
             index = { IndexHolder.index },
+            // 效果表是可选增强：拿不到就只是不显示效果，不影响出框
+            effects = { IndexHolder.effects },
         ).also { p ->
             p.listener = { outcome, frameAt, diag -> deliver(outcome, frameAt, diag) }
             // 让 OverlayService 能把自己绘制的区域告诉流水线（排除 App 自产文字，

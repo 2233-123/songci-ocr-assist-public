@@ -33,6 +33,21 @@ class StatusBarView(context: Context) : View(context) {
             invalidate()
         }
 
+    /**
+     * 副行文案 —— **词句效果**，例如 `民心-10 ｜ 战斗力+10`。
+     *
+     * 单独一行而不是接在主行后面：主行（`应选：X` / `首句 → 词牌 ✓ 0.88`）本来就不短，
+     * 再接一长串效果会接近屏宽、右侧还会被游戏的「词牌属性」面板压住。
+     *
+     * null / 空白 = 不显示（窗口高度按一行算）。
+     */
+    var subText: String? = null
+        set(value) {
+            if (field == value) return
+            field = value
+            invalidate()
+        }
+
     /** 偏好里可以关掉状态条（只留高亮框）。 */
     var barEnabled: Boolean = true
         set(value) {
@@ -63,21 +78,42 @@ class StatusBarView(context: Context) : View(context) {
         textSize = dp(15f)
     }
 
+    /**
+     * 副行（效果）用稍小、稍暗的字：信息密度更高，但视觉上不能抢主行的注意力。
+     *
+     * 字号取 14sp 而非更小 —— 游戏手书字体在 15sp 以下可读性明显下降
+     * （实测气泡字号 18px 已是下限）。
+     */
+    private val subPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = EFFECT_COLOR
+        textSize = dp(14f)
+    }
+
     private val rectF = RectF()
 
     /** 当前是否真的需要显示 */
     private val showing: Boolean
         get() = barEnabled && !paused && !text.isNullOrBlank()
 
+    /** 是否需要画第二行（词句效果）。 */
+    private val showingSub: Boolean
+        get() = showing && !subText.isNullOrBlank()
+
     /**
      * 窗口需要的高度（像素）。不显示时返回 0 → 窗口收成 0 高，屏幕上不留痕迹。
      *
      * 由 [OverlayService] 在调整窗口时调用，保证 view 与窗口尺寸一致。
+     * 有副行（效果）时高度按两行算。
      */
     fun statusWindowHeightPx(): Int {
         if (!showing) return 0
         val fm = textPaint.fontMetrics
-        return (TOP_DP * 2 + (fm.bottom - fm.top) + PAD_V_DP * 2).toFloat().let { dp(it) }
+        var h = (fm.bottom - fm.top) + PAD_V_DP * 2
+        if (showingSub) {
+            val subFm = subPaint.fontMetrics
+            h += SUB_GAP_DP + (subFm.bottom - subFm.top)
+        }
+        return (TOP_DP * 2 + h).toFloat().let { dp(it) }
             .roundToInt()
             .coerceAtLeast(1)
     }
@@ -90,25 +126,46 @@ class StatusBarView(context: Context) : View(context) {
         val padH = dp(PAD_H_DP)
         val padV = dp(PAD_V_DP)
         val top = dp(TOP_DP)
-        val textWidth = textPaint.measureText(t)
         val fm = textPaint.fontMetrics
-        val boxW = textWidth + padH * 2
-        val boxH = (fm.bottom - fm.top) + padV * 2
+        val sub = subText
+        val subFm = subPaint.fontMetrics
+
+        // 宽度取两行里更宽的那个
+        val mainW = textPaint.measureText(t) + padH * 2
+        val subW = if (showingSub) subPaint.measureText(sub) + padH * 2 else 0f
+        val boxW = maxOf(mainW, subW)
+        val boxH = if (showingSub) {
+            (fm.bottom - fm.top) + PAD_V_DP * 2 + dp(SUB_GAP_DP) + (subFm.bottom - subFm.top)
+        } else {
+            (fm.bottom - fm.top) + PAD_V_DP * 2
+        }
         // 水平居中于**窗口**；窗口宽度 = 整屏宽度，所以也就是居中于屏幕
         val left = (width - boxW) / 2f
         if (left < 0f) return
 
         rectF.set(left, top, left + boxW, top + boxH)
         canvas.drawRoundRect(rectF, dp(12f), dp(12f), bgPaint)
+        // 主行左对齐（居中会随长度抖动），整体盒子居中
         canvas.drawText(t, left + padH, top + padV - fm.top, textPaint)
+        if (showingSub) {
+            val subTop = top + padV + (fm.bottom - fm.top) + dp(SUB_GAP_DP)
+            // sub 的类型是 String?（Kotlin 无法从 showingSub 这个自定义 getter 推断非空）
+            canvas.drawText(sub.orEmpty(), left + padH, subTop - subFm.top, subPaint)
+        }
     }
 
     companion object {
         private const val BG_COLOR = 0xCC000000.toInt()
 
+        /** 副行（效果）颜色：偏暖黄，与高亮框同色系但更柔 */
+        private const val EFFECT_COLOR = 0xFFFFD98A.toInt()
+
         /** 距屏幕顶部 */
         private const val TOP_DP = 28f
         private const val PAD_H_DP = 12f
         private const val PAD_V_DP = 7f
+
+        /** 主行与副行之间的间距 */
+        private const val SUB_GAP_DP = 4f
     }
 }
