@@ -132,6 +132,12 @@ class OverlayService : Service() {
             // 早期是 MATCH_PARENT 全屏窗（虽然带 FLAG_NOT_TOUCHABLE），但实测在
             // 华为 HarmonyOS 上会让下层游戏收不到点击 —— 改为「按内容定尺寸的窄窗口」，
             // 从根源上规避 OEM 的触摸遮挡判定（详见 OverlayView 类注释）。
+            //
+            // **v0.11.1 为消除位移动画又改回了恒定整屏**，于是遮挡问题复发：
+            // Android 12+ 的「不可信触摸遮挡」拿**窗口 alpha** 判定，
+            // 整屏 NOT_TOUCHABLE 层 alpha=1.0 > 上限 0.80 ⇒ 触摸全被丢弃。
+            // 现在用 [Config.OVERLAY_WINDOW_ALPHA] 把窗口 alpha 压到上限之下，
+            // 命中官方「足够半透明」例外。详见该常量的注释（含系统日志原文）。
             val params = WindowManager.LayoutParams(
                 0,
                 0,
@@ -143,6 +149,7 @@ class OverlayService : Service() {
                 PixelFormat.TRANSLUCENT,
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
+                alpha = Config.OVERLAY_WINDOW_ALPHA
             }
             windowManager.addView(view, params)
             overlayView = view
@@ -156,6 +163,9 @@ class OverlayService : Service() {
             // **固定位置**的状态条窗口：宽度整屏、位置恒为屏幕顶部正中。
             // 不做成随内容移动的窗口，否则高亮框一动它就跟着动（用户反馈过）。
             // 虽然铺满屏幕宽度，但带 FLAG_NOT_TOUCHABLE（可触摸区域为空），不挡游戏。
+            //
+            // 注意：它也是**整屏宽**，同样会被 Android 12+ 的遮挡判定算进去，
+            // 所以 alpha 也要压到 [Config.OVERLAY_WINDOW_ALPHA]。
             val params = WindowManager.LayoutParams(
                 0,
                 0,
@@ -167,6 +177,7 @@ class OverlayService : Service() {
                 PixelFormat.TRANSLUCENT,
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
+                alpha = Config.OVERLAY_WINDOW_ALPHA
             }
             windowManager.addView(status, params)
             statusView = status

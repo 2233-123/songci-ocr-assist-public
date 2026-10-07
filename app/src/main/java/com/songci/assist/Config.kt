@@ -91,6 +91,57 @@ object Config {
      */
     const val MAX_MISS_LOGS_PER_PAI = 3
 
+    /**
+     * 悬浮层窗口自身的 alpha 上限 —— 用来**规避 Android 12+ 的「不可信触摸遮挡」拦截**。
+     *
+     * ### 事故（真机日志，MuMu 模拟器 Android 12 / API 32 实测）
+     *
+     * 开了辅助后**整个游戏界面都点不动**。系统日志给出完整栈：
+     *
+     * ```
+     * W InputDispatcher: Untrusted touch due to occlusion by com.songci.assist/10037
+     *                    (obscuring opacity = 1.00, maximum allowed = 0.80)
+     * D InputDispatcher: Stack of obscuring windows during untrusted touch (960, 540):
+     *     * type=2038, package=com.songci.assist/10037, mode=USE_OPACITY, alpha=1.00,
+     *       frame=[0,0][1920,1080], touchableRegion=[0,0][1920,1080],
+     *       flags={... NOT_TOUCHABLE NOT_TOUCH_MODAL ...}
+     *     * [TOUCHED] package=com.syyx.whrhx/10021, mode=BLOCK_UNTRUSTED
+     * ```
+     *
+     * 关掉 `block_untrusted_touches` 后立刻恢复正常（A/B 已验证）。
+     *
+     * ### 机制：判定用 `Window.alpha`，**和窗口里画了什么无关**
+     *
+     * 日志里的 `mode=USE_OPACITY, alpha=1.00` 直接说明系统读的是**窗口 alpha**。
+     * `WindowManager.LayoutParams.alpha` 默认 **1.0**，所以我们"视觉上几乎全透明"
+     * 完全不起作用 —— 整屏 `FLAG_NOT_TOUCHABLE` 层的每次触摸都被丢弃，
+     * 而且只写系统 logcat（`InputManager: Suppressing untrusted touch toast`），
+     * **屏幕上什么提示都没有**，用户只会觉得"游戏点不动了"。
+     *
+     * Android 官方例外之一是「足够半透明的系统警报窗口」：组合不透明度 ≤ 0.80。
+     *
+     * ### 为什么取 0.70 而不是 0.80
+     *
+     * 0.80 是**临界值**（判定是 `> 0.80` 才拒），留 0.10 余量避免浮点/叠加误差。
+     *
+     * ### 代价
+     *
+     * **整个窗口的绘制内容都会变成 70% 不透明**，所以高亮框和状态条会比以前略淡。
+     * 这是为了让触摸能透过去必须付的代价 —— 不能只改"看起来透明"的部分。
+     *
+     * ### 这是 v0.11.1 引入的回归
+     *
+     * ```
+     * 0.6.0  全屏窗        → 华为上「按钮点不动」→ 0.6.1 改成按内容贴合的小窗
+     * 0.11.0 小窗          → 「框从左上角飞过来」
+     * 0.11.1 改回恒定整屏  → 动画修好了，但把 0.6.1 的遮挡问题带了回来
+     * ```
+     *
+     * 用户手机上拦截开关恰好是关的（`block_untrusted_touches` 非默认值），
+     * 所以一直没暴露；MuMu 是干净的默认配置，立刻暴露。
+     */
+    const val OVERLAY_WINDOW_ALPHA = 0.70f
+
     // ------------------------------------------------------------------ 裁剪区
     /**
      * OCR 前裁剪到 y ∈ [0, 这个比例]。
