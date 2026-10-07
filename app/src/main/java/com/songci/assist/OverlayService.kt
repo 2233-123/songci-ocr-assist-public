@@ -356,14 +356,19 @@ class OverlayService : Service() {
         if (screenW <= 0) return
         val height = view.statusWindowHeightPx()
 
-        if (params.width == screenW && params.height == height &&
-            params.x == 0 && params.y == 0
+        // **收窄窗口，避开左上角/右上角** —— 见 STATUS_WINDOW_WIDTH_RATIO 的注释。
+        // 位置与尺寸都是常量推导出来的，**不随内容变**，所以不会触发位移动画。
+        val w = (screenW * STATUS_WINDOW_WIDTH_RATIO).toInt().coerceAtLeast(1)
+        val x = ((screenW - w) / 2f).toInt()
+
+        if (params.width == w && params.height == height &&
+            params.x == x && params.y == 0
         ) {
             return
         }
-        params.width = screenW
+        params.width = w
         params.height = height
-        params.x = 0
+        params.x = x
         params.y = 0
         safeUpdate(view, params)
     }
@@ -815,6 +820,52 @@ class OverlayService : Service() {
          * 留一点余量，避免描边（以及抗锯齿）被窗口边缘裁掉。
          */
         private const val OVERLAY_WINDOW_PADDING_DP = 8f
+
+        /**
+         * 状态条窗口宽度占屏宽的比例（**两侧各留 13% 空白**）。
+         *
+         * ### 为什么必须收窄（MuMu 实测，Android 12 / API 32）
+         *
+         * 原来状态条窗口是**整屏宽** `[0,0]-[1920,106]`，于是它和高亮层
+         * `[0,0]-[1920,1080]` 在**左上角重叠**。而 Android 12+ 的遮挡判定是
+         * **组合累加**的：
+         *
+         * ```
+         * 两个窗口各 alpha=0.70 → 组合 = 1 - (1-0.70)² = 0.91 > 0.80 → 触摸被丢弃
+         * ```
+         *
+         * 系统日志（点左上角返回按钮时）：
+         *
+         * ```
+         * W InputDispatcher: Untrusted touch due to occlusion by com.songci.assist/10044
+         *                    (obscuring opacity = 0.91, maximum allowed = 0.80)
+         * D Stack of obscuring windows during untrusted touch (110, 45):
+         *     * type=2038, alpha=0.70, frame=[0,0][1920,106]   touchableRegion=<empty>  ← 状态条
+         *     * type=2038, alpha=0.70, frame=[0,0][1920,1080]  touchableRegion=[0,0][1920,1080] ← 高亮层
+         * ```
+         *
+         * **这正是「游戏左上角返回按钮点不动、但别处正常」的原因** ——
+         * 游戏把返回按钮放在左上角，而那里恰好是两个悬浮窗唯一的重叠区。
+         *
+         * ### 为什么要靠"收窄"而不是一味压 alpha
+         *
+         * 压 alpha 是全局妥协：要让 `1-(1-a)² ≤ 0.80` 得 `a ≤ 0.5528`，
+         * 高亮框会淡到 50% 才够（实测 0.5 可行、0.6 被拦）。
+         * **收窄之后左上角只剩高亮层一个窗口**，子窗口 alpha 就能用回 0.70：
+         * 单个 0.70 < 0.80 ✓，而且**高亮框只淡到 70% 而不是 50%**。
+         *
+         * ### 为什么不破坏"框不飞过来"
+         *
+         * 宽度与横向位置都由这个常量推导，**与内容无关** ⇒ 窗口几何不随内容变
+         * ⇒ 不会触发 WindowManager 的位移动画（那是 v0.11.0 的老问题）。
+         * 只有首次布局时会从初始值过渡一次。
+         *
+         * 0.74 的取值依据：最长状态文案是
+         * `应选：X（屏上没找到选项气泡） ｜ 民心-10、战斗力+10`（约 33 字），
+         * 按 15sp 计约 1155px；屏宽 1920 的 74% = 1420px，留足余量，
+         * 同时两侧各留 250px 空白把两个上角让出来。
+         */
+        private const val STATUS_WINDOW_WIDTH_RATIO = 0.74f
 
         /** 是否开启调试面板（[CaptureService] 据此决定要不要每帧算诊断） */
         fun isDebugEnabled(context: Context): Boolean =
