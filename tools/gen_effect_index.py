@@ -99,9 +99,24 @@ def main() -> int:
     args = ap.parse_args()
 
     if not os.path.exists(args.effects):
+        # `--check` 是 CI/自检路径。公开仓库**既不分发** effects.json（生成物且含游戏数据）、
+        # **也不含**效果素材，此时无从校验，应当**跳过**而不是失败
+        # —— 与单测用 `Assume` 跳过同一套口径。
+        if args.check:
+            print("  本仓库不含效果素材与 effects.json（公开仓库不分发）→ 跳过校验")
+            return 0
         print("找不到效果表：%s" % args.effects, file=sys.stderr)
         print("它是游戏素材、不入库；请从自己的设备导出后放到 data/EffectTypeConfig.json"
               "，或用 --effects 指定路径。", file=sys.stderr)
+        return 2
+
+    # 词句表同样是游戏素材。公开仓库两者都没有 → `--check` 跳过。
+    if not os.path.exists(VERSE_SRC):
+        if args.check:
+            print("  本仓库不含 data/SongCiVerseConfig.json（公开仓库不分发）→ 跳过校验")
+            return 0
+        print("找不到词句表：%s" % VERSE_SRC, file=sys.stderr)
+        print("它是游戏素材、不入库；请从自己的设备导出到 data/ 下。", file=sys.stderr)
         return 2
 
     with io.open(VERSE_SRC, encoding="utf-8") as f:
@@ -195,6 +210,11 @@ def main() -> int:
     }
 
     if args.check:
+        if not os.path.exists(OUT):
+            # 公开仓库**不分发** effects.json（它是生成物且含游戏数据）。
+            # 所以这里不算失败，只说明跳过 —— 与单测用 Assume 跳过同一套口径。
+            print("  本仓库不含 effects.json（生成物/游戏数据，公开仓库不分发）→ 跳过校验")
+            return 0
         with io.open(OUT, encoding="utf-8") as f:
             cur = json.load(f)
         if cur != payload:

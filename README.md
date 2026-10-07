@@ -193,6 +193,12 @@ python tools/verify_all.py       # 一键自检：索引校验 + 匹配复算 + 
 只有**重新生成索引**才需要自备游戏数据：把游戏导出的两个 JSON 放进 `data/`
 （结构与字段见 [data/README.md](data/README.md)），然后跑 `python tools/gen_verse_index.py`。
 
+> **`assets/effects.json`（词句效果表）本仓库不分发** —— 它由 `tools/gen_effect_index.py`
+> 从游戏数据生成，内容与 `verses.json` 同性质（首句文本）。所以：
+> - 缺它**不影响构建与出框**（效果只是可选增强，App 端加载失败只记一行日志）
+> - 依赖它的单测会自动**跳过**（`Assume`），`verify_all.py` 也会跳过该项校验
+> - 想要这个功能，自备游戏数据后跑 `python tools/gen_effect_index.py` 即可
+
 > ⚠️ **本工程最初在含中文的目录下开发**（Windows 上的 `E:\Desktop\宋词辅助`）。
 > AGP 默认会对非 ASCII 路径直接报错，工程里用 `android.overridePathCheck=true` 关掉了该检查。
 > 若遇到离奇失败，优先怀疑这一项；想避开就把仓库克隆到纯 ASCII 路径。
@@ -213,8 +219,8 @@ python tools/verify_all.py       # 一键自检：索引校验 + 匹配复算 + 
 ├── docs/specs/                  # 设计文档（含设计意图与被实测推翻的结论）
 └── app/src/main/
     ├── AndroidManifest.xml
-    ├── assets/verses.json       # 词句索引
-    ├── assets/effects.json      # 词句 → 效果（生成物，随包）
+    ├── assets/verses.json       # 词句索引（随仓库提交）
+    ├── assets/effects.json      # 词句 → 效果（**生成物，本仓库不分发**；见下）
     └── java/com/songci/assist/
         ├── MainActivity.kt            # 引导页：授权 + 开始/停止 + 状态 + 导出日志
         ├── CaptureBridgeActivity.kt   # 透明桥接页，拉起系统录屏授权

@@ -55,3 +55,7 @@ zzz_fresh/
 
 # 公开仓库的隔离构建目录（不参与版本控制）
 .public-build/
+
+# 生成物且含游戏数据（首句 + 效果名），公开仓库不分发；
+# 依赖它的单测会自动跳过（见 EffectIndexTest / tools/gen_effect_index.py）
+app/src/main/assets/effects.json

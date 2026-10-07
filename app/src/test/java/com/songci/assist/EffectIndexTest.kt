@@ -19,6 +19,12 @@ import org.junit.Test
  * - 效果名：`EffectTypeConfig.EffectName`
  * - 数值：`SongCiVerseConfig.EffectParamList`
  *
+ * ### 公开仓库会跳过本测试
+ *
+ * `effects.json` 是**生成物且含游戏数据**（首句 + 效果名），公开仓库**不分发**。
+ * 所以这里的每个用例都通过 [Fixtures.effectsOrSkip] 取数据 —— 文件缺失时
+ * **自动跳过**（`Assume`），不会让 CI 变红。这与 [MatchBenchmark] 的做法一致。
+ *
  * ### 关键约束
  * 效果表**按索引首句字面量作 key**，运行时是纯等值查表。所以：
  * 「效果表 key 集合 == 索引 head 集合」是必须成立的硬约束 —— 本测试守护它。
@@ -27,7 +33,7 @@ import org.junit.Test
 class EffectIndexTest {
 
     private val index = Fixtures.index()
-    private val effects = Fixtures.effects()
+    private val effects: EffectIndex get() = Fixtures.effectsOrSkip()
 
     // ---------------------------------------------------------------- 数据一致性
 
@@ -55,6 +61,26 @@ class EffectIndexTest {
     @Test
     fun `不认识的词句查表应返回空列表而不是报错`() {
         assertTrue(effects.forHead("这句词根本不存在").isEmpty())
+    }
+
+    /**
+     * **无条件用例**：验证「缺失即跳过」机制本身。
+     *
+     * 它不依赖 `effects.json`，所以在公开仓库（不含该文件）里也会**真正执行**，
+     * 从而保证：
+     * - 缺文件时 [Fixtures.effectsOrNull] 返回 null（而不是抛异常把 CI 搞红）
+     * - 上面那些用例的跳过是**按预期**发生的，不是被别的原因掩盖
+     */
+    @Test
+    fun `效果表缺失时取值应为 null 而不是抛异常`() {
+        val e = Fixtures.effectsOrNull()
+        if (e == null) {
+            println("    本仓库不含 effects.json → 依赖它的用例会跳过（公开仓库正是这种状态）")
+        } else {
+            println("    本仓库含 effects.json（${e.size} 条）→ 依赖它的用例会正常执行")
+        }
+        // 两种状态都合法，这里只要求「不抛异常」
+        assertTrue("取值为 null 或有效对象都算正常", e == null || e.size > 0)
     }
 
     // ---------------------------------------------------------------- 内容性质

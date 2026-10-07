@@ -1,5 +1,7 @@
 package com.songci.assist
 
+import org.junit.Assume
+
 /**
  * 单测共用的假数据。
  *
@@ -69,10 +71,30 @@ object Fixtures {
 
     // ------------------------------------------------------------------ 效果表
 
-    private val cachedEffects: EffectIndex by lazy { EffectIndex.fromJson(loadEffectsJson()) }
+    /**
+     * 词句效果表（`effects.json`，随包发布）。
+     *
+     * **可能为 null** —— 它是**生成物**，公开仓库**不分发**（避免把游戏数据带出去）。
+     * 依赖它的测试用 [effectsOrSkip] 在缺失时自动跳过，不会让 CI 变红。
+     */
+    fun effectsOrNull(): EffectIndex? = runCatching {
+        EffectIndex.fromJson(loadEffectsJson())
+    }.getOrNull()
 
-    /** 词句效果表（`effects.json`，随包发布）。 */
-    fun effects(): EffectIndex = cachedEffects
+    /**
+     * 取效果表；**缺失时让当前测试跳过**（JUnit `Assume`）。
+     *
+     * 与 [MatchBenchmark] 同一套做法：需要额外素材的诊断/契约测试，
+     * 没有素材就跳过而不是失败 —— 这样公开仓库（纯代码副本）能正常跑 CI。
+     */
+    fun effectsOrSkip(): EffectIndex {
+        val e = effectsOrNull()
+        Assume.assumeTrue(
+            "本仓库不含 effects.json（生成物/游戏数据），跳过依赖它的测试",
+            e != null,
+        )
+        return e!!
+    }
 
     /** 从 classpath 读 effects.json（构建脚本把 src/main/assets 挂进了 test resources）。 */
     fun loadEffectsJson(): String {

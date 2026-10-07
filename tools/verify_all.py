@@ -80,10 +80,21 @@ def check_asset_index() -> bool:
     return run("索引校验（已提交的 verses.json）", ROOT / "tools" / "gen_verse_index.py", ["--check"])
 
 
+def check_effect_index() -> bool:
+    """效果表必须能被 gen_effect_index.py --check 认可。
+
+    公开仓库既不含游戏素材、也不分发 `assets/effects.json`（生成物且含游戏数据），
+    此时该脚本**自己跳过**并返回 0 —— 与本仓库单测用 `Assume` 跳过是同一套口径。
+    """
+    return run("效果索引校验（若存在 assets/effects.json）",
+               ROOT / "tools" / "gen_effect_index.py", ["--check"])
+
+
 def main() -> int:
     quick = "--quick" in sys.argv
     ok = True
     ok &= check_asset_index()
+    ok &= check_effect_index()
     ok &= run("匹配算法复算 + 阈值扫描", ROOT / "tools" / "tune_matcher.py",
               ["--samples", "200" if quick else "1000"])
     ok &= check_gradle_consistency()
