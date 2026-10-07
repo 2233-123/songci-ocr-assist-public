@@ -74,6 +74,10 @@ class OverlayService : Service() {
     @Volatile
     private var destroyed = false
 
+    /** 上一次是否已就「状态条逼近首句」告警过（去重，避免每帧刷日志） */
+    @Volatile
+    private var occlusionWarned = false
+
     private val main = Handler(Looper.getMainLooper())
 
     private val clearRunnable: Runnable by lazy {
@@ -448,7 +452,7 @@ class OverlayService : Service() {
                 }
                 lastOutcome = outcome
                 view.highlight = (outcome as? FrameOutcome.Hit)?.target
-                setStatusText(statusTextOf(outcome), statusSubTextOf(outcome))
+                setStatusText(statusLineOf(outcome))
                 // 内容变了 → 重新贴合窗口（状态条窗口位置固定，只可能变高度）
                 applyOverlayLayout()
                 main.removeCallbacks(clearRunnable)
@@ -465,21 +469,10 @@ class OverlayService : Service() {
      * 调整高度，因此它不会像以前那样被高亮框的位置带着来回移动。
      */
     private fun setStatusText(text: String?) {
-        setStatusText(text, null)
-    }
-
-    /**
-     * 更新顶部状态条（主行 + 可选的**词句效果**副行）。
-     *
-     * 状态条在**独立窗口**里（见 [StatusBarView]），窗口位置固定、只在文案变化时
-     * 调整高度，因此它不会像以前那样被高亮框的位置带着来回移动。
-     */
-    private fun setStatusText(text: String?, sub: String?) {
         val view = statusView ?: return
         view.barEnabled = showStatusBar
         view.paused = paused
         view.text = text
-        view.subText = sub
         applyStatusLayout()
     }
 
@@ -496,7 +489,37 @@ class OverlayService : Service() {
     }
 
     /**
-     * 效果副行文案：`民心-10 ｜ 战斗力+10`。
+     * 状态条完整文案 = 结论 + **词句效果**，**同一行**。
+     *
+     * ### 为什么必须是同一行（真机事故）
+     *
+     * v0.11.0 曾把效果做成**第二行**。结果状态条底边压到了游戏的**首句文字**上
+     * （游戏把首句固定画在 `y ≈ 0.19`，历次日志实测 60/60 次）。
+     *
+     * 首句是**取帧时一起被 OCR 的** —— 盖住它就等于让 OCR 读不到首句：
+     *
+     * ```
+     * 该局 95 帧里 90 帧「首句未匹配」   ← 识别不出新句子
+     * 同时顶部按钮也点不动了              ← 遮挡层变高
+     * ```
+     *
+     * 用户的原话是「效果就放在原有的单行的那个框里就行了，OCR 又不看那个框，而且位置也够」
+     * —— 完全正确：状态条是 App 自己画的，OCR 要读的是**底下的游戏文字**，
+     * 而且单行框的横向空间本来就很富余（屏宽 2608px，文案只占约 500px）。
+     *
+     * 效果与结论用 ` ｜ ` 分隔，例如：
+     * ```
+     * 应选：江城子（屏上没找到选项气泡） ｜ 军心+4、战斗力+2
+     * ```
+     */
+    private fun statusLineOf(outcome: FrameOutcome): String {
+        val head = statusTextOf(outcome)
+        val eff = statusSubTextOf(outcome) ?: return head
+        return if (head.isEmpty()) eff else "$head$EFFECT_SEPARATOR$eff"
+    }
+
+    /**
+     * 效果文案：`军心+4、战斗力+2`。
      *
      * 口径（用户确认）：
      * - **不显示「词元」** —— 这一步在生成期就排掉了（effects.json 里根本不含词元）
@@ -510,7 +533,7 @@ class OverlayService : Service() {
             else -> emptyList()
         }
         if (effects.isEmpty()) return null
-        return effects.joinToString(EFFECT_SEPARATOR) { it.label() }
+        return effects.joinToString("、") { it.label() }
     }
 
     /**
@@ -539,7 +562,9 @@ class OverlayService : Service() {
         statusView?.let { sv ->
             if (showStatusBar && !sv.text.isNullOrBlank()) {
                 val h = sv.statusWindowHeightPx().coerceAtLeast(1)
-                out += floatArrayOf(0f, 0f, 1f, (h.toFloat() / screenH).coerceIn(0f, 0.5f))
+                val bottomRatio = (h.toFloat() / screenH).coerceIn(0f, 0.5f)
+                out += floatArrayOf(0f, 0f, 1f, bottomRatio)
+                guardHeadOcclusion(bottomRatio, h)
             }
         }
 
@@ -552,6 +577,50 @@ class OverlayService : Service() {
         }
 
         p.selfDrawnBounds = out
+    }
+
+    /**
+     * **遮挡哨兵**：状态条底边离游戏首句太近就报警。
+     *
+     * ### 要防的是什么
+     *
+     * 状态条是 App 自己画的浮层，而首句是**取帧时一起被 OCR 的**。状态条压住首句
+     * 就等于让 OCR 读不到首句 —— 表现为「识别不出新句子」，而用户会以为是引擎不行。
+     * **App 遮住自己要读的字**，是这个工程里最难自查的错误。
+     *
+     * 真机事故（v0.11.0）：效果做成状态条第二行 → 该局 95 帧里 90 帧「首句未匹配」。
+     *
+     * ### 为什么用日志而不是直接改布局
+     *
+     * 布局该由设计常量决定，不在运行时"自动缩"。这里只负责**让它可观测**：
+     * 一旦有人再加内容把状态条撑高，日志里就会出现 `overlay.occlusion`，
+     * 而不是等用户反馈"识别不出新句子"。
+     *
+     * 只在**跨过阈值时**打一次（用标志位去重），否则每帧都会刷。
+     */
+    private fun guardHeadOcclusion(bottomRatio: Float, heightPx: Int) {
+        val clearance = Config.GAME_HEAD_LINE_RATIO - bottomRatio
+        val bad = clearance < Config.MIN_HEAD_CLEARANCE_RATIO
+        if (bad == occlusionWarned) return
+        occlusionWarned = bad
+        if (bad) {
+            EventLog.log(
+                "overlay.occlusion",
+                "状态条底边 %.3f 已逼近游戏首句 %.3f（净空 %.3f < %.3f），" +
+                    "OCR 可能读不到首句！状态条高 %d px。" +
+                    "本行来自 v0.11.0 的事故守护（当时 95 帧里 90 帧读不到首句）".format(
+                        bottomRatio, Config.GAME_HEAD_LINE_RATIO, clearance,
+                        Config.MIN_HEAD_CLEARANCE_RATIO, heightPx,
+                    ),
+            )
+        } else {
+            EventLog.log(
+                "overlay.occlusion",
+                "状态条底边 %.3f，首句 %.3f，净空 %.3f ✓".format(
+                    bottomRatio, Config.GAME_HEAD_LINE_RATIO, clearance,
+                ),
+            )
+        }
     }
 
     // ------------------------------------------------------------------ 悬浮球手势
