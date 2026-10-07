@@ -64,7 +64,18 @@ class VerseIndex private constructor(
         var best: Verse? = null
         var bestScore = 0.0
         for (v in verses) {
-            val s = Matcher.similarity(t, v.head)
+            // 用**形近等价**相似度：把「读成形近字」也算作相同（见 [CONFUSABLE_CLASSES]）。
+            //
+            // 短首句对此尤其敏感 —— 实测「甚矣吾衰矣」（5 字）被读成「甚美吾衰吴」，
+            // 两个字错 → 编辑距离相似度只有 `1 - 2/5 = 0.600`，远低于阈值 0.72，
+            // **整句废掉**（用户反馈"识别结果不太好"）。形近等价后直接满分。
+            //
+            // 首句越短越怕错字，这是本项目的一个结构性弱点：
+            //   5 字首句最多容忍 1 个错字（错 2 个 = 0.600 ✗）
+            //   6 字首句最多容忍 1 个错字（错 2 个 = 0.667 ✗）
+            //   8 字首句最多容忍 2 个错字（错 2 个 = 0.750 ✓）
+            // 索引里 5~6 字的短首句只有 3 条，都是这类高风险条目。
+            val s = confusableSimilarity(t, v.head)
             if (s > bestScore) {
                 bestScore = s
                 best = v
@@ -116,12 +127,13 @@ class VerseIndex private constructor(
             val h = v.head
             val s = if (h.length < t.length) {
                 // 首句比候选短时只能整体比较
-                Matcher.similarity(t, h)
+                confusableSimilarity(t, h)
             } else {
                 var local = 0.0
                 val last = minOf(scan, h.length - t.length)
                 for (k in 0..last) {
-                    val x = Matcher.similarity(t, h.substring(k, k + t.length))
+                    // 同样用形近等价（见 nearestAny 的说明）—— 短首句的错字必须靠它兜住
+                    val x = confusableSimilarity(t, h.substring(k, k + t.length))
                     if (x > local) local = x
                     if (local == 1.0) break
                 }
@@ -189,6 +201,13 @@ class VerseIndex private constructor(
             "丑卫亚",
             // 儿 / 几 形近（实测丑奴儿 -> 卫奴几，末字读错）
             "儿几",
+            // 矣 / 美 / 吴 形近。实测**首句**「甚矣吾衰矣」被读成「甚美吾衰吴」
+            // —— 5 字首句错 2 个字，相似度只有 0.600，远低于阈值 0.72，整句废掉。
+            // 安全性：索引里「矣」只出现在 id=85（贺新郎）这一条首句里，
+            //「美」「吴」不出现在任何首句里 → 折叠后零碰撞。
+            "矣美吴",
+            // 衰 / 哀 形近（手书字体下下半部极像）
+            "衰哀",
         )
 
         /** 每个字 → 所属组的序号（-1 表示不属于任何组） */
