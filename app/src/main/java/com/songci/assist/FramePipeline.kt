@@ -179,6 +179,12 @@ class FramePipeline(
     var lastResult: String? = null
         private set
 
+    /** 上一次 [logOptionMiss] 记的是哪个词牌（换题即重置计数） */
+    private var missLoggedFor: String? = null
+
+    /** 当前词牌已记过几次「气泡没找到」 */
+    private var missLoggedCount = 0
+
     /**
      * 命中/未命中的回调；第二个参数是**该结论对应的那一帧**的时刻
      * （[SystemClock.elapsedRealtime]），供悬浮层判断结果是否已经过期。
@@ -466,23 +472,12 @@ class FramePipeline(
         val midBlocks = FramePreprocessor.midArea(usable)
         val target = Matcher.scanOptions(midBlocks, head.verse.pai, verseIndex)
             ?: Matcher.scanOptions(usable, head.verse.pai, verseIndex)
+        // 诊断：真机日志里出现过「气泡明明在同一帧的 frame.ocr 明细中、坐标也在
+        // 0.30~0.80 区间内，却报未找到」。离线用真机原文块复现不出来（Matcher.match、
+        // FramePipeline.evaluate、像素空间映射三条路径都判 Hit），说明"日志里看到的块"
+        // 与"匹配时真正拿到的块"存在差异。把匹配那一刻的实况打出来才能定死。
+        if (target == null) logOptionMiss(head.verse.pai, midBlocks, usable)
         val outcome = if (target == null) {
-            // 诊断：真机日志里出现过「气泡明明在同一帧的 frame.ocr 明细中、坐标也在
-            // 0.30~0.80 区间内，却报未找到」。离线用真机原文块复现不出来（Matcher.match、
-            // FramePipeline.evaluate、像素空间映射三条路径都判 Hit），说明"日志里看到的块"
-            // 与"匹配时真正拿到的块"存在差异。把匹配那一刻的实况打出来才能定死。
-            if (MatcherDebug.enabled) {
-                MatcherDebug.log(
-                    "optMiss",
-                    "应选=${head.verse.pai} 收到${blocks.size}块 中区${midBlocks.size}块 " +
-                        "中区块=[${midBlocks.joinToString(" ") {
-                            "%.2f:%s".format(it.normalized().centerY, it.text.take(6))
-                        }}] " +
-                        "全区含该词牌=${blocks.any {
-                            VerseIndex.normalize(it.text) == VerseIndex.normalize(head.verse.pai)
-                        }}",
-                )
-            }
             FrameOutcome.PaiOnly(
                 head.verse.pai, head.matchedText, head.similarity, paiEffectsOf(head.verse),
             )
@@ -509,6 +504,61 @@ class FramePipeline(
      */
     private fun paiEffectsOf(verse: Verse): List<PaiEffect> =
         effects?.invoke()?.forHead(verse.head).orEmpty()
+
+    /**
+     * 诊断：**首句认出来了、但屏上没找到对应气泡**时，把那一刻实况记下来。
+     *
+     * ### 为什么这个探针要常开（而不是只在调试模式下）
+     *
+     * 用户反馈「某些词牌的选项要等很久才认出来」，而**调试模式会显著改变时序**
+     * （冷却缓存只在非调试下生效），所以"开面板复现"本身就会污染现象。
+     *
+     * 而 `frame.ocr` 那份逐块明细**每 20 帧才采一次**，采到的多数还是游戏的其他页面
+     * —— 我据此查了半天都没定位到那两道题。所以需要一个**按需、精确**的记录：
+     * 只要"首句认出来 + 气泡没找到"就记，且**每题最多记 3 次**（避免刷爆环形缓冲）。
+     *
+     * ### 记录什么
+     *
+     * - `应选`：目标词牌
+     * - `中区`：气泡区（0.30~0.80）里实际拿到的块 → **看 OCR 把它读成了什么**
+     * - `全区含该词牌`：整帧有没有一块规范化后正好等于该词牌（判断是不是被自绘区域剔掉了）
+     * - `缺口`：区外有没有"像该词牌"的块（判断是不是**坐标**问题而不是识别问题）
+     */
+    private fun logOptionMiss(want: String, midBlocks: List<TextBlock>, usable: List<TextBlock>) {
+        // 换题/出框后计数清零，于是每题只记开头几次失败
+        if (missLoggedFor != want) {
+            missLoggedFor = want
+            missLoggedCount = 0
+        }
+        if (missLoggedCount >= Config.MAX_MISS_LOGS_PER_PAI) return
+        missLoggedCount++
+
+        val wantN = VerseIndex.normalize(want)
+        val mid = midBlocks.joinToString(" ") {
+            "%.2f:%s".format(it.normalized().centerY, VerseIndex.normalize(it.text).take(6))
+        }
+        val exactAnywhere = usable.any { VerseIndex.normalize(it.text) == wantN }
+        // "像该词牌"= 同长度且形近相似度 >= 0.5（比阈值松，用于判断是否只是差一点）
+        val nearOutside = usable
+            .filter { it.normalized().centerY !in Config.OPTION_REGION_TOP..Config.OPTION_REGION_BOTTOM }
+            .filter {
+                val t = VerseIndex.normalize(it.text)
+                t.length == wantN.length &&
+                    VerseIndex.confusableSimilarity(t, wantN) >= 0.5
+            }
+            .joinToString(" ") {
+                "%.2f:%.2f:%s".format(
+                    it.normalized().centerX, it.normalized().centerY,
+                    VerseIndex.normalize(it.text).take(6),
+                )
+            }
+
+        MatcherDebug.log(
+            "optMiss",
+            "应选=$want 中区块数=${midBlocks.size} 中区=[$mid] " +
+                "全区含该词牌=$exactAnywhere 区外像该词牌=[$nearOutside]",
+        )
+    }
 
     fun shutdown() {
         listener = null

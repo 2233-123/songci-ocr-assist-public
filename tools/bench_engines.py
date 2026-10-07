@@ -39,7 +39,7 @@ def sim(a, b):
     return 1 - lev(a, b) / max(len(a), len(b))
 
 
-def match_head(blocks, threshold=0.72):
+def match_head(blocks, threshold=0.65):
     """复刻 Matcher.scanHead + mergeAdjacent：整体 + 所有长度 ≥5 的子串，取最高分。
 
     注意 blocks 必须已经过 [merge_lines] 处理 —— 不同版本引擎对同一行的切分粒度不同

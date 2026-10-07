@@ -606,12 +606,10 @@ class OverlayService : Service() {
         if (bad) {
             EventLog.log(
                 "overlay.occlusion",
-                "状态条底边 %.3f 已逼近游戏首句 %.3f（净空 %.3f < %.3f），" +
-                    "OCR 可能读不到首句！状态条高 %d px。" +
-                    "本行来自 v0.11.0 的事故守护（当时 95 帧里 90 帧读不到首句）".format(
-                        bottomRatio, Config.GAME_HEAD_LINE_RATIO, clearance,
-                        Config.MIN_HEAD_CLEARANCE_RATIO, heightPx,
-                    ),
+                "状态条底边 %.3f 已逼近游戏首句 %.3f（净空 %.3f < %.3f），OCR 可能读不到首句！状态条高 %d px。本行来自 v0.11.0 的事故守护（当时 95 帧里 90 帧读不到首句）".format(
+                    bottomRatio, Config.GAME_HEAD_LINE_RATIO, clearance,
+                    Config.MIN_HEAD_CLEARANCE_RATIO, heightPx,
+                ),
             )
         } else {
             EventLog.log(

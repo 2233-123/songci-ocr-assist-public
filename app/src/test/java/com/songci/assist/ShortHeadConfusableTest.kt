@@ -109,10 +109,10 @@ class ShortHeadConfusableTest {
             while (1.0 - (t + 1).toDouble() / len >= Config.SIMILARITY_THRESHOLD) t++
             return t
         }
-        assertEquals("5 字首句只能容忍 1 个错字", 1, tol(5))
-        assertEquals("6 字首句只能容忍 1 个错字", 1, tol(6))
+        assertEquals("5 字首句只能容忍 1 个错字（错 2 个 = 0.600 < 0.65）", 1, tol(5))
+        assertEquals("6 字首句能容忍 2 个错字（0.65 阈值）", 2, tol(6))
         assertEquals("8 字首句能容忍 2 个错字", 2, tol(8))
-        assertEquals("12 字首句能容忍 3 个错字", 3, tol(12))
+        assertEquals("12 字首句能容忍 4 个错字（0.65 阈值）", 4, tol(12))
 
         // 索引里到底有多少条这种短首句
         val short = index.verses.filter { it.head.length <= 6 }

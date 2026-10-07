@@ -38,7 +38,7 @@ def main():
         items = to_blocks(boxes, texts)
         best = match_head(merge_rows(items))
         name = f.replace(".png", "")
-        truth[name] = best[0]["pai"] if best and best[1] >= 0.72 else ""
+        truth[name] = best[0]["pai"] if best and best[1] >= 0.65 else ""
 
     with io.open(OUT, "w", encoding="utf-8") as fh:
         json.dump(truth, fh, ensure_ascii=False, indent=1)

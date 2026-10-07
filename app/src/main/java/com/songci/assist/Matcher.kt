@@ -191,7 +191,7 @@ object Matcher {
                     if (best == null || hit.similarity > best!!.similarity) best = hit
                     return best
                 }
-                // 只有「短截断」的候选才走前缀法，且只对齐开头。
+                // 只有「短截断」的候选才走前缀法，且**先只对齐开头**（便宜）。
                 //
                 // 为什么限制长度：前缀法是为了救「首句分批渐显、OCR 只读到前几段」，
                 // 而游戏每段就是几字到十几字。放开到最长首句会让一个 21 字文本枚举

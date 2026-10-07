@@ -33,7 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 INDEX = ROOT / "app" / "src" / "main" / "assets" / "verses.json"
 
 #: 与 app/src/main/java/com/songci/assist/Config.kt 保持一致
-SIMILARITY_THRESHOLD = 0.72
+SIMILARITY_THRESHOLD = 0.65
 MIN_HEAD_LEN = 5
 MERGE_TOLERANCE_RATIO = 0.6
 MAX_MERGED_LINES = 2
