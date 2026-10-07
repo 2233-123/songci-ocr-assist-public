@@ -336,7 +336,24 @@ class CaptureService : Service() {
 
         val thread = HandlerThread("songci-frame").also { it.start() }
         readerThread = thread
-        val handler = Handler(thread.looper)
+        // 安全网：取帧线程上任何逃逸的异常都不能崩掉进程。
+        //
+        // 真机上踩过一次：`ScreenFrameReader.toPixels` 抛
+        // `IllegalStateException: buffer is inaccessible`，而 `onImageAvailable`
+        // 里没接住，直接打到线程的未捕获处理器 → 用户看到闪退。
+        //
+        // 修好那一处之后这里再兜一层：逐条消息接住异常，以后任何同类问题
+        // 最多丢几帧，绝不闪退。`Handler.Callback.handleMessage` 返回 true
+        // 表示已消费该消息，异常就不会再往上抛。
+        val handler = Handler(thread.looper) { msg ->
+            try {
+                msg.callback?.run()
+            } catch (t: Throwable) {
+                Log.w(TAG, "取帧线程消息异常（已吞掉，仅丢帧）", t)
+                EventLog.log("frame.crash", "取帧异常已吞: ${t.javaClass.simpleName} ${t.message}")
+            }
+            true
+        }
         readerHandler = handler
 
         val vd = createCaptureSurface(mp, width, height, density, handler)
@@ -352,6 +369,9 @@ class CaptureService : Service() {
             index = { IndexHolder.index },
         ).also { p ->
             p.listener = { outcome, frameAt, diag -> deliver(outcome, frameAt, diag) }
+            // 让 OverlayService 能把自己绘制的区域告诉流水线（排除 App 自产文字，
+            // 否则状态条里的词牌名会被当成气泡选中并自锁，见 FramePipeline.selfDrawnBounds）
+            PipelineHolder.set(p)
         }
         // 索引异步加载：这里是启动瞬间的一次预热，加载失败也能在引导页看到
         IndexHolder.get(this) { }
@@ -485,6 +505,31 @@ class CaptureService : Service() {
     private fun onFrameFromReader(frame: ScreenFrameReader.FrameData) {
         val now = SystemClock.elapsedRealtime()
         imageCallbacks++
+        // 取帧与吞吐统计（每 200 次回调报一次）。
+        //
+        // 这一行是回答"为什么快/为什么慢"的关键：把**回调速率**（取帧侧能力）
+        // 与**受理速率**（管道实际吞吐）并排打出来，一眼就能区分是"帧不够"
+        // 还是"处理不过来"。用户报告「开调试面板很快、关掉很慢」，正需要这个对比。
+        if (imageCallbacks % 200 == 0) {
+            val cb = imageCallbacks - lastCbCountAt
+            val el = now - lastCbAt
+            val ac = acceptedFrames - lastAcAt
+            if (el >= 500) {
+                EventLog.log(
+                    "frame.rate",
+                    "回调 %d 次 / %d ms = %.1f/s；受理 %d = %.1f/s，丢弃 %d（busy 抢占）"
+                        .format(
+                            cb, el, cb * 1000.0 / el,
+                            ac, ac * 1000.0 / el,
+                            droppedFrames - lastDropAt,
+                        ),
+                )
+                lastCbCountAt = imageCallbacks
+                lastCbAt = now
+                lastAcAt = acceptedFrames
+                lastDropAt = droppedFrames
+            }
+        }
         // 只保留"有意义的动作"日志：取帧回调每秒约 30 次，全打会把 EventLog 的
         // 60 条环形缓冲冲爆，导致真正的诊断（scanHead/match）被挤掉 —— 前面两轮
         // 的诊断"没打印"就是这个原因。
@@ -500,6 +545,8 @@ class CaptureService : Service() {
             return
         }
         ocrBusy = true
+        val waitMs = now - frame.capturedAt
+        if (waitMs > worstWaitMs) worstWaitMs = waitMs
         p.markAccepted(now)
         acceptedFrames++
         lastFrameAt = now
@@ -511,6 +558,14 @@ class CaptureService : Service() {
             }
         }
     }
+
+    /** 「取到帧 → 开始处理」的最长等待（诊断：若很大说明帧在高频到达后才被受理） */
+    @Volatile
+    private var worstWaitMs = 0L
+    private var lastCbCountAt = 0
+    private var lastCbAt = 0L
+    private var lastAcAt = 0
+    private var lastDropAt = 0
 
     /** 进入处理的帧数（诊断用） */
     @Volatile
@@ -528,10 +583,6 @@ class CaptureService : Service() {
 
     @Volatile
     private var processedFrames = 0
-
-    /** 上次做二次识别（补救）的时刻，用于限流 */
-    @Volatile
-    private var lastRetryAt = 0L
 
     /** 内容当前的真实尺寸（onCapturedContentResize 通知） */
     @Volatile
@@ -563,10 +614,19 @@ class CaptureService : Service() {
         var bitmap: Bitmap? = null
         // 开关必须在 OCR/匹配之前设好：匹配发生在流水线的线程上
         MatcherDebug.enabled = OverlayService.isDebugEnabled(this)
+        // 分项计时：真机基准显示 ML Kit 单帧只要 ~113ms，但 App 里一帧要好几秒 ——
+        // 必须量化每一段，否则优化全凭猜。
+        val tEnter = SystemClock.elapsedRealtime()
+        var tBitmap = 0L
+        var tOcr1 = 0L
+        var tMatch = 0L
+        var tRetry = 0L
+        var tFinish = 0L
         try {
             bitmap = Bitmap.createBitmap(
                 frame.pixels, frame.width, frame.height, Bitmap.Config.ARGB_8888,
             )
+            tBitmap = SystemClock.elapsedRealtime()
             processedFrames++
             if (processedFrames % 10 == 1) {
                 EventLog.log(
@@ -576,14 +636,15 @@ class CaptureService : Service() {
                 // 实机诊断：落盘一张，方便 adb pull 下来直接看画面
                 if (processedFrames <= 11) dumpFrame(bitmap)
             }
-            // **只裁掉底部无用区，按原生分辨率识别**（关键性能取舍）。
+            // **只裁掉底部无用区，按原生分辨率识别**。
             //
-            // 实测：全屏 2608x1200 单次 OCR 要 1.6~2.4 秒；裁到 y ∈ [0, 0.85] 后
-            // 像素少 15%，同时把底部立绘/按钮/歌词区整块剔除（那里文字多且无用，
-            // 实测能多识出十几个块，白花时间）。
+            // 裁到 y ∈ [0, 0.85] 的收益是把底部立绘/歌词区整块剔除（那里会多识出十几个
+            // 无用块）。**不能裁得更狠**：首句那行位置会随游戏 UI 浮动，裁到 0.7 以下
+            // 就会切掉首句（曾经踩过，导致"永远匹配不上"）。
             //
-            // 注意不能裁得更狠：首句那行位置会随游戏 UI 浮动，裁到 0.7 以下就会
-            // 切掉首句（曾经踩过，导致"永远匹配不上"）。0.85 保留充分余量。
+            // 关于"为什么不缩放"：真机基准实测本机首句字高 38px、**气泡字高仅 18px**，
+            // 而游戏用的是手书字体（字魂43号国潮手写）。缩到 85% 气泡就只剩 15px、
+            // 75% 只剩 13.5px，会直接读不出 —— 所以缩放这条路已用数据否决。
             // ---- 直接识别：不做"等画面停稳"的门控 ----
             //
             // 曾经试过用画面指纹判断动画停稳后再 OCR（想解决"首句先渐入、选项后渐入"
@@ -605,13 +666,20 @@ class CaptureService : Service() {
             }
             if (ocrSource !== bitmap) ocrSource.recycle()
             val blocks = rawBlocks
+            tOcr1 = SystemClock.elapsedRealtime()
             if (processedFrames <= 3 || processedFrames % 20 == 1) {
-                // 逐块打印：确认 ML Kit 到底读到了哪些行、各自在什么 y 位置
+                // 逐块打印：确认 ML Kit 到底读到了哪些行、各自在什么位置。
+                //
+                // **必须带 x**：用户反馈「选项是最左边那个时，高亮出现得比较慢」。
+                // 只打 y 的话这个假设无法验证（无法区分左/中/右气泡），
+                // 所以这里把 x 也打出来 —— 格式 `x=..,y=..:文本`。
                 val dump = blocks
                     .map { it.normalized() }
                     .sortedBy { it.centerY }
                     .joinToString(" ｜ ") {
-                        "y=%.2f:%s".format(it.centerY, VerseIndex.normalize(it.text))
+                        "x=%.2f,y=%.2f:%s".format(
+                            it.centerX, it.centerY, VerseIndex.normalize(it.text),
+                        )
                     }
                 EventLog.log("frame.ocr", "第 $processedFrames 帧共 ${blocks.size} 块 → $dump")
             }
@@ -628,61 +696,61 @@ class CaptureService : Service() {
                 screenHeight = screen.y,
                 rotation = currentRotation(),
             )
+            tMatch = SystemClock.elapsedRealtime()
 
-            // ---- 二次识别（补救 OCR 漏读）----
+            // ================== 二次识别（补救）已移除 ==================
             //
-            // 游戏里首句与词牌气泡都是艺术字体，ML Kit 时常读错/漏读：
-            // 实测有「仅词牌 X（未找到气泡）」和「首句未匹配」两类。
-            // 对策：**只对相应区域裁剪并放大 2 倍再识别一次**，把结果合并回整帧。
+            // ### 为什么移除（真机实测，2026-10-07）
             //
-            // **必须限流**：二次识别要多花一次 OCR（放大 2 倍后像素翻 4 倍，最慢）。
-            // 实测不限流时每帧花 2.5~3 秒（0.3fps），用户感受就是"半天没反应"。
-            // 这里只允许「距上次补救 ≥ [RETRY_MIN_INTERVAL_MS]」时才补一次，
-            // 保证正常帧仍是 2fps 的节流节奏。
-            val nowMs = SystemClock.elapsedRealtime()
-            var secondPass = ""
-            val failed = matched.startsWith("首句未匹配") || matched.startsWith("仅词牌")
-            if (failed && nowMs - lastRetryAt >= RETRY_MIN_INTERVAL_MS) {
-                lastRetryAt = nowMs
-                val band = if (matched.startsWith("首句未匹配")) {
-                    Config.TOP_CROP_TOP to Config.TOP_CROP_BOTTOM
-                } else {
-                    Config.OPTION_REGION_TOP to Config.OPTION_REGION_BOTTOM
-                }
-                val alt = recognizeBand(bitmap, band.first, band.second)
-                if (alt.isNotEmpty()) {
-                    val merged = FramePreprocessorImages.mergeBlocks(blocks, alt)
-                    val retry = runCatching {
-                        p.matchNow(
-                            blocks = merged,
-                            frameWidth = result.frameWidth,
-                            frameHeight = result.frameHeight,
-                            frameAt = capturedAt,
-                            debug = debug,
-                            screenWidth = screen.x,
-                            screenHeight = screen.y,
-                            rotation = currentRotation(),
-                        )
-                    }.getOrNull()
-                    secondPass = "→二次:${retry ?: "无"}(${alt.size}块)"
-                    if (retry != null && retry != matched) matched = retry
-                } else {
-                    secondPass = "→二次:无补充"
-                }
-            } else if (failed) {
-                // 限流跳过：明确写出来，避免误以为"没做补救"
-                secondPass = "→二次:限流跳过"
-            }
+            // 补救的历史是逐层被数据剥掉的：
+            //
+            // 1. **放大取消**（v0.8.2）：基准实测 1x 与 2x 的气泡命中数完全相同
+            //    （都是 26/28），2x 却贵 45%。
+            // 2. **3 秒限流取消**（v0.8.2）：它的前提是补救很贵，而实测一次并不贵，
+            //    限流反而让用户在失败时干等 3 秒。
+            // 3. **补救本身取消**（本版）：最关键的实测 ——
+            //
+            //      分段                          中位耗时
+            //      首轮 OCR（全帧 2608x1020）     218 ms
+            //      补救    （横带 2608x 264）     235 ms
+            //
+            //    **补救只读 1/4 的像素，耗时却和整帧一样** → ML Kit 每次调用有
+            //    约 150ms 的**固定开销**，与像素数几乎无关。
+            //
+            //    而补救的成功率（v0.8.3 日志，132 帧）：
+            //
+            //      补救后仍未命中   93 帧
+            //      补救后命中        2 帧     <- 只有 2 次真正帮上忙（2%）
+            //
+            //    **用一整次 OCR 的开销换 2% 的成功率，是亏的。**
+            //
+            // ### 替代方案（用户提出，数据支持）：读全屏、以量取胜
+            //
+            // 既然每次调用约 150ms 固定开销、像素几乎免费，那就**只调用一次但读满**：
+            // 实测全帧(1020px) 218ms，读满全屏(1200px) 预计仅多约 20%（约 260ms），
+            // 仍比「全帧 + 补救」的约 450ms 快近一倍。
+            //
+            // 更重要的是：失败帧不再多花 235ms，单帧从约 450ms 降到约 220ms，
+            // 帧率上限由约 2.2fps 提到约 4.5fps —— **单位时间内的新图像样本数翻倍**。
+            // 这才是以量取胜的实质：把时间花在多看几帧，而不是把同一帧看两遍。
+            tRetry = SystemClock.elapsedRealtime()
 
             val topBlocks = blocks
                 .map { it.normalized() }
                 .filter { it.centerY <= Config.TOP_CROP_BOTTOM }
                 .sortedBy { it.top }
                 .joinToString("/") { VerseIndex.normalize(it.text).take(12) }
+            tFinish = SystemClock.elapsedRealtime()
+            // 分项耗时（毫秒）：排队 / 建Bitmap / OCR / 匹配 / 收尾
+            // （「二次」这一段已随补救一起移除，字段保留为 0 以免破坏日志解析）
+            val timing = "⏱排队${tEnter - capturedAt} 位图${tBitmap - tEnter} OCR${tOcr1 - tBitmap} " +
+                "匹配${tMatch - tOcr1} 二次${tRetry - tMatch} 收尾${tFinish - tRetry} " +
+                "总${tFinish - capturedAt}"
             EventLog.log(
                 "帧$processedFrames",
-                "$matched $secondPass｜N=${blocks.size}｜顶部[$topBlocks]",
-            )        } catch (t: Throwable) {
+                "$matched$timing｜N=${blocks.size}｜顶部[$topBlocks]",
+            )
+        } catch (t: Throwable) {
             Log.w(TAG, "取帧失败", t)
         } finally {
             bitmap?.recycle()
@@ -709,30 +777,14 @@ class CaptureService : Service() {
             .joinToString(" / ") { VerseIndex.normalize(it.text) }
             .ifEmpty { "（空）" }
 
-    /**
-     * 二次识别：裁出 `y ∈ [top, bottom]` 的横带，**放大 [OCR_RETRY_SCALE] 倍**后 OCR，
-     * 再把坐标映射回整帧。
-     *
-     * 为什么要放大：游戏里首句/词牌是艺术字体，原生分辨率下 ML Kit 时常读错一两个字
-     * （实测「定风波」气泡漏读、首句整行漏读）。放大后笔画分离度更好，识别率明显提升。
-     * 只在第一次匹配失败时调用，正常帧不增加开销。
-     */
-    private fun recognizeBand(src: Bitmap, top: Float, bottom: Float): List<TextBlock> {
-        val engine = ocrEngine ?: return emptyList()
-        val band = FramePreprocessorImages.cropBand(src, top, bottom)
-        val scaled = FramePreprocessorImages.scaleUp(band, OCR_RETRY_SCALE)
-        val blocks = try {
-            engine.recognize(scaled).blocks
-        } catch (t: Throwable) {
-            Log.w(TAG, "二次识别失败", t)
-            emptyList()
-        } finally {
-            if (scaled !== band && scaled !== src) scaled.recycle()
-            if (band !== src) band.recycle()
-        }
-        if (blocks.isEmpty()) return emptyList()
-        return FramePreprocessorImages.mapBlocksToFullFrame(blocks, top, bottom, OCR_RETRY_SCALE)
-    }
+    // recognizeBand(...) 已随二次识别一起移除。
+    //
+    // 它曾经做过「裁横带 + 放大 [OCR_RETRY_SCALE] 倍 + 再识别」，理由是"艺术字体放大后
+    // 笔画分离度更好"。真机实测否掉了这个理由：
+    //   - 放大 1x vs 2x 的气泡命中数完全相同（26/28）
+    //   - 补救成功率仅 2/95（2%），而每次要多花约 235ms
+    //   - 且 ML Kit 每次调用有约 150ms 固定开销，读 1/4 像素并不更快
+    // 详见 processPixels 里那段说明。
 
     /** 把处理过的帧存成 PNG（`adb pull` 用） */
     private fun dumpFrame(bitmap: Bitmap) {
@@ -778,6 +830,8 @@ class CaptureService : Service() {
         pipeline?.listener = null
         pipeline?.shutdown()
         pipeline = null
+        // 同时摘掉对外引用，避免 OverlayService 往一个已 shutdown 的管道里写状态
+        PipelineHolder.set(null)
         ocrEngine?.close()
         ocrEngine = null
 
@@ -892,17 +946,11 @@ class CaptureService : Service() {
         /** 自动恢复前的等待：让旧的 VirtualDisplay / ImageReader 彻底释放 */
         private const val AUTO_RESTART_DELAY_MS = 400L
 
-        /** 二次识别（补救 OCR 漏读）的放大倍数 */
-        private const val OCR_RETRY_SCALE = 2
-
-        /**
-         * 两次二次识别之间的最小间隔。
-         *
-         * 二次识别要多花一次 OCR（放大 2 倍 → 像素 4 倍，最慢的那一步）。
-         * 实测不限流时每帧 2.5~3 秒（0.3fps），用户感受是"半天没反应"。
-         * 限流后正常帧仍有 2fps 的响应速度，漏读帧每 3 秒补一次也够用。
-         */
-        private const val RETRY_MIN_INTERVAL_MS = 3000L
+        // 这里曾有 OCR_RETRY_SCALE = 2（补救放大倍数）与 RETRY_MIN_INTERVAL_MS = 3000
+        // （补救限流）。两者连同补救本身一起移除了，理由见 processPixels 里的说明：
+        //   放大：1x 与 2x 命中数相同（26/28），2x 却贵 45%
+        //   限流：前提是"补救很贵"，实测不贵，反而让用户干等 3 秒
+        //   补救本身：成功率仅 2/95（2%），每次却多花约 235ms
 
 
 

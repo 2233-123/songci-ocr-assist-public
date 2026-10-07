@@ -74,5 +74,20 @@
         <service
             android:name=".OverlayService"
             android:exported="false" />
+
+        <!--
+            导出日志用：把 cacheDir/logs/*.txt 以 content:// 分享出去。
+            Android 7 起不允许用 file:// 传 URI（FileUriExposedException），必须走 provider。
+            路径映射见 res/xml/file_paths.xml（只放开 logs 子目录）。
+        -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

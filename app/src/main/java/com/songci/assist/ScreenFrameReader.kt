@@ -213,14 +213,53 @@ class ScreenFrameReader(
             null
         } ?: return
         try {
-            val pixels = toPixels(image) ?: return
-            onFrame(FrameData(pixels, image.width, image.height, now))
+            // **必须接住所有异常**：这是 ImageReader 的 Handler 线程，
+            // 抛出未捕获异常会**直接崩掉进程**。真机崩溃栈就是这里：
+            //
+            //   java.lang.IllegalStateException: buffer is inaccessible
+            //     at java.nio.DirectByteBuffer.get(DirectByteBuffer.java:260)
+            //     at ...onImageAvailable
+            //
+            // 成因（Android 16 / 换消费者路径）：`vd.surface = null` + `resize()` 期间
+            // 已经入队的帧，其 native buffer 会被提前释放，而 `Image` 仍被 acquire 到 ——
+            // 于是 `plane.buffer` 看起来可用，实际每次 `get` 都抛 IllegalStateException。
+            //
+            // 处理原则：**这种情况丢掉这一帧即可**，下一帧（33ms 后）就正常了。
+            // 宁可漏一帧，也不能让用户看到闪退。
+            val pixels = toPixels(image)
+            if (pixels != null) {
+                onFrame(FrameData(pixels, image.width, image.height, now))
+            } else {
+                droppedReads++
+                if (droppedReads == 1L || droppedReads % 50L == 0L) {
+                    onLog("frame.read", "读帧失败已丢弃 $droppedReads 帧（buffer 不可访问，通常是换消费者瞬间）")
+                }
+            }
+        } catch (t: Throwable) {
+            droppedReads++
+            if (droppedReads == 1L || droppedReads % 50L == 0L) {
+                onLog(
+                    "frame.read",
+                    "读帧异常已丢弃 $droppedReads 帧: ${t.javaClass.simpleName} ${t.message}",
+                )
+            }
+            Log.w(TAG, "读帧失败（已丢弃该帧）", t)
         } finally {
             runCatching { image.close() }
         }
     }
 
-    /** RGBA_8888 → IntArray（带 rowStride padding，必须逐行读） */
+    /** 读帧失败被丢弃的次数（诊断：换消费者瞬间会集中出现） */
+    @Volatile
+    private var droppedReads = 0L
+
+    /**
+     * RGBA_8888 → IntArray（带 rowStride padding，必须逐行读）。
+     *
+     * 这里**故意不用 `buffer.asIntBuffer()`**：它创建的视图在源 buffer 失效后
+     * 仍会被读取，真机崩溃栈里的 `DirectByteBuffer.get` 就是这条路径。
+     * 统一走 `buffer.get(ByteArray)`，由调用方保证捕获异常。
+     */
     private fun toPixels(image: Image): IntArray? {
         val plane = image.planes.firstOrNull() ?: return null
         val width = image.width
@@ -229,19 +268,16 @@ class ScreenFrameReader(
         val pixelStride = plane.pixelStride
         val buffer = plane.buffer
         val pixels = IntArray(width * height)
-        if (pixelStride == 4 && rowStride == width * 4) {
-            buffer.rewind()
-            buffer.asIntBuffer().get(pixels)
-            return pixels
-        }
         val row = ByteArray(rowStride)
         for (y in 0 until height) {
             buffer.position(y * rowStride)
             val len = minOf(rowStride, buffer.remaining())
+            if (len <= 0) continue
             buffer.get(row, 0, len)
             var src = 0
             var dst = y * width
             for (x in 0 until width) {
+                if (src + 3 >= len) break
                 val r = row[src].toInt() and 0xFF
                 val g = row[src + 1].toInt() and 0xFF
                 val b = row[src + 2].toInt() and 0xFF

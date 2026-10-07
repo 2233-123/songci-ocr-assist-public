@@ -13,6 +13,23 @@ package com.songci.assist
  */
 object Matcher {
 
+    /**
+     * 子串候选走「前缀对齐」的最大长度。
+     *
+     * 游戏首句分批渐显，每段几字到十几字；前缀法只对这类**短截断**有意义。
+     * 实测（`MatchBenchmark`）放开到 24 字会让匹配整体慢 3 倍，收到 12 字后降到 ~1.3 倍，
+     * 而且「前 5~12 字认回自己」的覆盖没有损失。
+     */
+    private const val MAX_PREFIX_CANDIDATE_LEN = 12
+
+    /**
+     * 判定「位置相同」的容差（归一化 y）。
+     *
+     * OCR 给出的同一行 y 每次会有 1~2px 抖动（归一化后约 0.001），
+     * 取 0.004（约 5px）既能把同一行视为相同位置，又不会把相邻两行混为一谈。
+     */
+    private const val Y_TIE_EPSILON = 0.004f
+
     // ======================================================================
     // 公共 API
     // ======================================================================
@@ -33,32 +50,62 @@ object Matcher {
         }
         if (top.isEmpty()) return HeadMatch.Miss
 
-        // 单块内部还能拆行（ML Kit 有时把一个区域合成一个块）
+        // 单块内部还能拆行（ML Kit 有时把一个区域合成一个块）。
+        //
+        // 注意：**排序必须是升序**，因为 mergeAdjacent 只把「相邻」的簇合并成一组，
+        // 顺序一变分组结果就变了。要「从下往上判断」的意图放在下面迭代时反转。
         val clusters = clustersOf(lineItems(top)).sortedBy { it.minY }
 
         var best: HeadMatch.Hit? = null
         var bestLines = Int.MAX_VALUE
+        var bestMinY = Float.NEGATIVE_INFINITY
+        // 取舍规则：**位置优先**（更靠下 = 当前题），相似度与行数次之。
+        //
+        // 为什么位置放到第一位 —— 真机日志给了两个必须用位置才能区分的场景：
+        //
+        // 1. 换题瞬间**上一题的首句残留在上方**，当前题的首句在更下面
+        //    （帧155：残留「庭院深深深几许…」在 y=0.06，当前「一曲新词酒一杯」在 y=0.19）。
+        // 2. 两个首句同时可读时，**两者的相似度都是满分 1.0**，分数无法区分，
+        //    于是会在两者之间来回抖（日志里实测：如梦令↔诉衷情、少年游↔丑奴儿 各抖 3 次）。
+        //
+        // 用户反馈的后果是「题都换了，框还停在旧答案上」→ 容易误触。
+        // 改成位置优先后，当前题（更靠下）稳定胜出。
+        //
+        // 注意仍在 TOP_CROP 区间内（0.0~0.45）：更下面的提示气泡（y≈0.7）不会进来。
         for (group in mergeAdjacent(clusters, Config.MAX_MERGED_LINES)) {
             val text = group.joinToString("") { it.text }
             val normalized = VerseIndex.normalize(text)
             if (normalized.length < Config.MIN_HEAD_LEN) continue
 
             val hit = bestVerseIn(normalized, index) ?: continue
-            // 分数相同时取行数更少的组合：更可能是"真的那句话"，而不是粘上了旁边的东西
-            if (best == null || hit.similarity > best.similarity ||
-                (hit.similarity == best.similarity && group.size < bestLines)
-            ) {
+            val minY = group.minOf { it.minY }
+            val better = best == null ||
+                // 1) 更靠下（当前题）
+                minY > bestMinY + Y_TIE_EPSILON ||
+                // 2) 位置相同：相似度更高
+                (kotlin.math.abs(minY - bestMinY) <= Y_TIE_EPSILON &&
+                    (hit.similarity > best!!.similarity ||
+                        // 3) 位置与分数都相同：行数更少（更可能是"真的那句话"）
+                        (hit.similarity == best!!.similarity && group.size < bestLines)))
+            if (better) {
                 best = hit
                 bestLines = group.size
+                bestMinY = minY
             }
         }
-        // 诊断：输出顶部候选与得分。
-        // 只打"顶部块 + 结果"两行，避免把 EventLog 的环形缓冲冲爆。
-        run {
+        // 诊断：**只在调试模式打印**。
+        //
+        // 这段早先是无条件执行的，代价被严重低估：
+        // - 每帧往 EventLog 写两行长文本，把环形缓冲冲爆（真机日志证实：400 条混杂
+        //   事件里绝大多数是 scanHead 这两行）；
+        // - 更贵的是它**又跑了一遍完整匹配** —— `mergeAdjacent` 后对每个分组调
+        //   `bestVerseIn`，而后者内部是子串全搜索。真机实测匹配耗时中位 51ms、
+        //   最大 865ms，这一段占了相当比例。
+        if (MatcherDebug.enabled) {
             val blockDump = top.joinToString(" ｜ ") {
                 "y=%.2f:%s".format(it.centerY, VerseIndex.normalize(it.text).take(18))
             }
-            EventLog.log("scanHead块", "$blockDump")
+            MatcherDebug.log("scanHead块", blockDump)
             val top3 = mergeAdjacent(clusters, Config.MAX_MERGED_LINES)
                 .map { g ->
                     val t = VerseIndex.normalize(g.joinToString("") { it.text })
@@ -68,9 +115,9 @@ object Matcher {
                 .sortedByDescending { it.substringAfterLast('=') }
                 .take(3)
                 .joinToString(" ｜ ")
-            EventLog.log(
+            MatcherDebug.log(
                 "scanHead果",
-                "${if (best != null) "命中 ${best.verse.pai} %.3f".format(best.similarity) else "未匹配"} ｜ ${top3}",
+                "${if (best != null) "命中 ${best.verse.pai} %.3f".format(best.similarity) else "未匹配"} ｜ $top3",
             )
         }
         return best ?: HeadMatch.Miss
@@ -104,14 +151,57 @@ object Matcher {
             }
         }
 
+        /**
+         * 前缀对齐候选。
+         *
+         * 与 [consider] 并列（不是替代）：游戏首句是**分批渐显**的，OCR 常常只读到前几段，
+         * 而 [consider] 的相似度分母是较长者，短候选会被严重低估 —— 实测把 99 条的
+         * 「前 7 字」喂进旧逻辑只有 8/99 命中。这里改用「候选 vs 首句等长前缀」比较，
+         * 前缀一字不差即为 1.0。
+         */
+        fun considerPrefix(text: String, alignAtZeroOnly: Boolean = false) {
+            if (text.length < Config.MIN_HEAD_LEN) return
+            val current = best
+            val near = index.nearestByPrefix(text, alignAtZeroOnly) ?: return
+            if (near.second < Config.SIMILARITY_THRESHOLD) return
+            val candidate = HeadMatch.Hit(near.first, near.second, text)
+            if (current == null || candidate.similarity > current.similarity) {
+                best = candidate
+            }
+        }
+
         // 先试整体（精确命中就是 1.0，直接结束）
         consider(normalized)
         if (best?.similarity == 1.0) return best
+        // 整体不是完整首句时，试「整体是否等于某条首句的截断」—— 一字不差即 1.0。
+        // 这是救「首句分批渐显」的关键一步（真机 bug：一曲新词酒一杯 认不出浣溪沙）。
+        considerPrefix(normalized)
+        if (best?.similarity == 1.0) return best
 
-        // 再试所有长度 ≥ MIN_HEAD_LEN 的子串：覆盖「OCR 多读了前缀/后缀」的情况
+        // 再试所有长度 ≥ MIN_HEAD_LEN 的子串：覆盖「OCR 多读了前缀/后缀」的情况。
         for (start in 0..normalized.length - Config.MIN_HEAD_LEN) {
             for (end in normalized.length downTo start + Config.MIN_HEAD_LEN) {
-                consider(normalized.substring(start, end))
+                val sub = normalized.substring(start, end)
+                // **先用精确表筛一遍**：完整首句走精确命中即可，不必进前缀法。
+                // 这一步是性能关键 —— 不加它，每个子串都要跑「5 窗口 × 99 条」比较，
+                // JVM 实测单次匹配从 ~10ms 涨到 27ms（真机更差）。
+                val exact = index.lookup(sub)
+                if (exact != null) {
+                    val hit = HeadMatch.Hit(exact, 1.0, sub)
+                    if (best == null || hit.similarity > best!!.similarity) best = hit
+                    return best
+                }
+                // 只有「短截断」的候选才走前缀法，且只对齐开头。
+                //
+                // 为什么限制长度：前缀法是为了救「首句分批渐显、OCR 只读到前几段」，
+                // 而游戏每段就是几字到十几字。放开到最长首句会让一个 21 字文本枚举
+                // 出上百个候选 × 99 条，A/B 实测整体慢 3 倍。
+                // 长文本本来就有 `consider(normalized)` 的整体比较兜着。
+                if (sub.length <= MAX_PREFIX_CANDIDATE_LEN) {
+                    considerPrefix(sub, alignAtZeroOnly = true)
+                    if (best?.similarity == 1.0) return best
+                }
+                consider(sub)
                 if (best?.similarity == 1.0) return best
             }
         }
@@ -156,13 +246,30 @@ object Matcher {
         }
         if (best != null) return HighlightRect.of(best)
 
-        // 第二优先：同长度、相似度 ≥ 阈值的块，且必须是唯一最优解
+        // 第二优先：同长度、相似度 ≥ 阈值的块，且必须是唯一最优解。
+        //
+        // 打分前把**形近字**折回代表字（见 [VerseIndex.canonicalizeConfusable]）。
+        //
+        // 为什么必须做：3 字词牌错 1 字是 0.667，而阈值 0.66 —— **只高 0.007**，
+        // 所以只要错 2 个字就跌破阈值（0.333）。而 OCR 对某些字会反复读错：
+        //
+        //   鹧鸪天 -> 鹤鸽天   0.333 ❌
+        //   丑奴儿 -> 卫奴儿   0.667（卡边缘，时好时坏）
+        //   丑奴儿 -> 卫奴几   0.333 ❌
+        //
+        // 折叠后：`鹧鸪天/鹤鸽天` 都变 `鹧鸪天`，`丑奴儿/卫奴儿/卫奴几` 都变 `丑奴儿`
+        // —— 直接满分命中。安全性由 [ConfusableClassTest] 断言守护（每个代表字
+        // 在 40 个词牌里只出现一次，折回去不可能把 A 词牌变成 B 词牌）。
         val scored = inRegion
             .mapNotNull { b ->
                 val t = VerseIndex.normalize(b.text)
                 if (t.length != want.length || t.isEmpty()) return@mapNotNull null
                 val s = similarity(t, want)
-                if (s < Config.OPTION_SIMILARITY_THRESHOLD) null else s to b
+                // 形近字等价打分：把"读成形近字"也算作相同，
+                // 覆盖"两个字都读错"的情况（见 VerseIndex.CONFUSABLE_CLASSES）
+                val sCanon = VerseIndex.confusableSimilarity(t, want)
+                val score = maxOf(s, sCanon)
+                if (score < Config.OPTION_SIMILARITY_THRESHOLD) null else score to b
             }
             .sortedByDescending { it.first }
         if (scored.isEmpty()) return null
@@ -172,6 +279,29 @@ object Matcher {
         // 唯一最优：第二名必须明显更低，否则宁可不出框也不画错地方
         if (bestScore - runnerUp < Config.OPTION_SIMILARITY_MARGIN) return null
         return HighlightRect.of(bestBlock)
+    }
+
+    /**
+     * 与 [match] 相同，但**排除屏幕顶部一片区域**（App 自己画的状态条所在处）。
+     *
+     * ### 为什么需要（用户反馈 + 代码确认）
+     *
+     * 状态条画的是 `应选：蝶恋花（屏上没找到选项气泡）`。OCR 把它读回来后，
+     * 如果**只切出词牌名那三个字**（OCR 常在标点/括号处断块），那就是一个
+     * **恰好等于词牌名的块** —— 而 [scanOptions] 的第一优先判据正是"整块恰好等于词牌名"，
+     * 于是**框被画到 App 自己的状态文字上**，而不是游戏气泡上。
+     *
+     * 用户的原话：「我认为就是因为你 OCR 识别到了自己的提示框」—— 判断是对的。
+     *
+     * App 自己画了什么、画在哪是**已知信息**，用它排除比靠坐标阈值猜可靠得多。
+     */
+    fun matchExcluding(
+        blocks: List<TextBlock>,
+        index: VerseIndex,
+        excludeTopRatio: Float,
+    ): MatchResult {
+        val kept = blocks.filter { it.normalized().centerY > excludeTopRatio }
+        return match(kept, index)
     }
 
     /** 两段合一：供真机流水线与单测直接调用。 */

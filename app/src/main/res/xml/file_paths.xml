@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  导出日志用的 FileProvider 路径映射。
+
+  只暴露 cacheDir/logs 这一个子目录 —— 不要放开整个 cacheDir，
+  否则等于把应用私有缓存都暴露给任何拿到 URI 的 App。
+-->
+<paths>
+    <cache-path name="logs" path="logs/" />
+</paths>

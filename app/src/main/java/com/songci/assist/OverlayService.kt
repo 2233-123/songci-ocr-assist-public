@@ -204,40 +204,123 @@ class OverlayService : Service() {
         }
 
     /**
-     * 按「当前要画的内容」调整高亮层窗口的位置与尺寸。
+     * 高亮层窗口：**整屏、位置钉死在 (0,0)、永不移动**。
      *
-     * 没有内容时窗口收成 **0×0** —— 屏幕上完全没有我们的窗口，也就不可能遮挡任何东西。
-     * 有内容时窗口只覆盖内容包围盒（框 / 调试面板）外扩一点。
+     * ### 为什么不再"按内容包围盒缩小窗口"（用户反馈"框要从左上角飞过来"）
      *
-     * 这是「不在全屏覆盖」这条原则的落地点：即使某个 ROM 不尊重
-     * `FLAG_NOT_TOUCHABLE`，被挡住的也只是那一小块，不会让整个游戏的按钮失灵。
+     * 原实现让窗口贴合内容包围盒（无内容时收成 0×0）。但**悬浮窗的
+     * `params.x/y/width/height` 一旦变化，`WindowManager` 默认会播放窗口移动动画** ——
+     * 于是每次出框，窗口都从上一个位置（左上角）带着动画滑到目标位置。
      *
-     * 注意**状态条不在这里** —— 它有自己的固定窗口（见 [applyStatusLayout]），
-     * 否则会被高亮框的位置带着动。
+     * 用户明确要求：「让高亮框直接出现在对应位置，不要有移动动画」。
+     *
+     * ### 修法
+     *
+     * 窗口尺寸固定为整屏、`x/y` 固定为 0 —— **窗口几何再也不变**，
+     * `WindowManager` 就没有可动画的对象；每次只是 `view.invalidate()` 重画
+     * （高亮框是画布上的内容，不是窗口本身）。这样框就是**直接出现在目标位置**。
+     *
+     * 因为窗口恒定，`updateViewLayout` 在第一帧之后不会再被调用（下面有提前返回），
+     * 每帧只走 `applyLayout` + `invalidate`。
+     *
+     * ### 会不会又挡住游戏按钮？
+     *
+     * 不会。本窗口带 `FLAG_NOT_TOUCHABLE or FLAG_NOT_FOCUSABLE`，触摸事件直接穿透；
+     * 当初"华为/鸿蒙按钮点不动"的根因是 **`MATCH_PARENT` 的触摸遮挡判定**，
+     * 正确修法是这两个 flag（已经加上了），而**不是**把窗口缩小。
+     * 缩窗口只是绕开，代价就是现在这个飞行动画。
+     *
+     * ### 状态条为什么仍单独一个窗口
+     *
+     * 见 [applyStatusLayout]：两者的**包围盒原本被并成一个窗口**，导致高亮框一动、
+     * 状态条在屏幕上就跟着跑。拆开是必须的，与本次改动无关。
      */
+    /**
+     * **真实物理显示尺寸**（`getRealMetrics`），不是应用窗口尺寸。
+     *
+     * ### 为什么必须用它
+     *
+     * 高亮坐标是**按捕获帧的尺寸归一化**的，而捕获面（`ScreenFrameReader`）用的是
+     * `Display.getRealMetrics()` = 真实物理显示。若这里用 `resources.displayMetrics`
+     * （应用窗口尺寸），两端尺寸不一致，框就会按比例偏掉。
+     *
+     * 真机实测这两个值**确实不同**：
+     *
+     * ```
+     * getRealMetrics       : 2608 x 1200   <- 帧 / 归一化基准
+     * resources.displayMetrics: 2464 x 1152   <- 应用窗口（之前拿来当窗口尺寸了）
+     * ```
+     *
+     * 于是气泡 x=0.66 被算成 `0.66*2464 = 1626px`，而正确位置是 `0.66*2608 = 1721px` ——
+     * **横向偏约 95px，框画不中气泡**。
+     *
+     * 这个坑在 [ScreenFrameReader] 的注释里早就记过（"用 displayMetrics 会拿到
+     * 应用窗口尺寸"），但只修了捕获侧，没同步修悬浮窗侧。
+     */
+    private fun realDisplaySize(): android.graphics.Point {
+        val p = android.graphics.Point()
+        runCatching {
+            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            @Suppress("DEPRECATION")
+            wm.defaultDisplay?.getRealMetrics(
+                android.util.DisplayMetrics().also { dm -> p.set(dm.widthPixels, dm.heightPixels) },
+            )
+        }
+        if (p.x > 0 && p.y > 0) return p
+        // 兜底：真实尺寸取不到时退回应用窗口尺寸（至少不会崩）
+        val dm = resources.displayMetrics
+        return android.graphics.Point(
+            dm.widthPixels.coerceAtLeast(1),
+            dm.heightPixels.coerceAtLeast(1),
+        )
+    }
+
     private fun applyOverlayLayout() {
         val view = overlayView ?: return
         val params = overlayParams ?: return
         if (destroyed) return
 
-        val metrics = resources.displayMetrics
-        val screenW = metrics.widthPixels
-        val screenH = metrics.heightPixels
-        val padding = (OVERLAY_WINDOW_PADDING_DP * metrics.density).roundToInt()
-        val layout = OverlayView.layoutFor(view.contentBoundsPx(), screenW, screenH, padding)
+        val size = realDisplaySize()
+        val screenW = size.x
+        val screenH = size.y
+        if (screenW <= 0 || screenH <= 0) return
 
-        view.applyLayout(layout)
-        if (params.width == layout.width &&
-            params.height == layout.height &&
-            params.x == layout.x &&
-            params.y == layout.y
+        // **窗口整屏 ⇒ 画布原点就在屏幕 (0,0) ⇒ 绘制原点必须是 (0,0)。**
+        //
+        // 这里曾经调用 `layoutFor` 拿它算出的 `contentOriginX/Y`。那套公式是给
+        // 「贴合内容包围盒的窄窗口」用的：窗口顶边在 `bounds.top - padding`，
+        // 所以内容坐标要向下平移同样距离才落进窗口（`contentOriginY = -top`）。
+        //
+        // 窗口改成恒定整屏之后这个偏移就成了 bug —— 真机诊断值：
+        //
+        //     几何: view=2464x1152 content=2464x1152 origin=(0,-444) hl=(0.66,0.42,0.70,0.45)
+        //
+        // `originY = -444` 把本该画在 y≈516px 的框抬到 72px（接近屏幕顶部），
+        // 调试面板也被抬到左上角 —— 表现就是「框只出现在左上角」。
+        //
+        // 现在直接强制 (0,0)：内容坐标 == 画布坐标 == 真实屏幕坐标，不再有任何偏移。
+        view.applyLayout(
+            OverlayView.WindowLayout(
+                x = 0,
+                y = 0,
+                width = screenW,
+                height = screenH,
+                contentOriginX = 0,
+                contentOriginY = 0,
+                screenW = screenW,
+                screenH = screenH,
+            ),
+        )
+
+        if (params.width == screenW && params.height == screenH &&
+            params.x == 0 && params.y == 0
         ) {
             return
         }
-        params.width = layout.width
-        params.height = layout.height
-        params.x = layout.x
-        params.y = layout.y
+        params.width = screenW
+        params.height = screenH
+        params.x = 0
+        params.y = 0
         safeUpdate(view, params)
     }
 
@@ -309,7 +392,7 @@ class OverlayService : Service() {
         }
     }
 
-    /** 调试面板内容：帧数 / 顶部 OCR / 匹配结果。 */
+    /** 调试面板内容：帧数 / 顶部 OCR / 匹配结果 / **窗口与绘制几何**。 */
     private fun diagLines(diag: FrameDiag, outcome: FrameOutcome): List<String> {
         val status = when (outcome) {
             is FrameOutcome.Hit -> "命中 → ${outcome.pai}（已框住气泡）"
@@ -317,11 +400,15 @@ class OverlayService : Service() {
             is FrameOutcome.NoMatch -> "首句未匹配"
             is FrameOutcome.Empty -> "本帧无文本"
         }
+        // 几何诊断：改了「窗口恒整屏」之后出现"框只在左上角"的问题，
+        // 需要把窗口尺寸、view 实测尺寸、绘制原点、内容坐标尺寸一起打出来才能定位。
+        val g = overlayView?.geometryDesc() ?: "（无 view）"
         return listOf(
             "帧 #${diag.frameCount}${if (diag.idle) " (省电)" else ""}",
             "顶部OCR: ${diag.headText.ifEmpty { "（空）" }}",
             if (diag.pai.isNotEmpty()) "匹配: ${diag.pai}  sim=%.2f".format(diag.similarity) else "匹配: 无",
             "状态: $status",
+            "几何: $g",
         )
     }
 
@@ -331,6 +418,9 @@ class OverlayService : Service() {
         // 只靠 setter 会在「先点开始、后开调试」的顺序下永远看不到面板
         val dbg = debugMode
         if (view.debugMode != dbg) view.debugMode = dbg
+        // 每次重画前先把自己画在哪报给流水线 —— 状态条文案里含词牌名，
+        // 不排除的话会被当成气泡选中，并自锁导致框永不消失（见 publishSelfDrawnBounds）
+        publishSelfDrawnBounds()
         when (outcome) {
             is FrameOutcome.Empty, is FrameOutcome.NoMatch -> {
                 lastOutcome = null
@@ -392,6 +482,47 @@ class OverlayService : Service() {
 
         is FrameOutcome.PaiOnly -> context.getString(R.string.status_pai_only_format, outcome.pai)
         else -> ""
+    }
+
+    /**
+     * 把自己画在屏幕上的区域（归一化）告诉流水线，让它**排除**这些文字。
+     *
+     * ### 为什么必须做（用户反馈 + 离线验证）
+     *
+     * 用户：「择律后回到主界面，高亮框却没即时消失…旧的高亮框就会误导玩家」，
+     * 并判断「就是因为你 OCR 识别到了自己的提示框」。
+     *
+     * 状态条画的是 `应选：蝶恋花（屏上没找到选项气泡）`。OCR 一旦在括号处断块，
+     * 就产出**恰好等于词牌名的块** —— 而 `scanOptions` 的第一优先判据正是
+     * "整块恰好等于词牌名" → 框画到 App 自己的文案上，并且**自锁**：
+     * 框在状态条上 → 文字被读回 → 继续命中 → `HIGHLIGHT_TTL_MS` 不断重置 → 框永不消失。
+     *
+     * 所以这里把两个自绘区域报上去：
+     * - **状态条**：屏幕顶部整条（高度按内容自适应）
+     * - **调试面板**：`OverlayView` 里固定在 `DEBUG_TOP_RATIO` 起的一块
+     */
+    private fun publishSelfDrawnBounds() {
+        val p = PipelineHolder.get() ?: return
+        val screenH = realDisplaySize().y.coerceAtLeast(1)
+        val out = ArrayList<FloatArray>(2)
+
+        // 1) 状态条：顶部整条（高度按内容自适应）
+        statusView?.let { sv ->
+            if (showStatusBar && !sv.text.isNullOrBlank()) {
+                val h = sv.statusWindowHeightPx().coerceAtLeast(1)
+                out += floatArrayOf(0f, 0f, 1f, (h.toFloat() / screenH).coerceIn(0f, 0.5f))
+            }
+        }
+
+        // 2) 调试面板：从 DEBUG_TOP_RATIO 起，占屏幕一部分
+        overlayView?.let { ov ->
+            if (ov.debugMode && ov.debugLines.isNotEmpty()) {
+                val top = OverlayView.DEBUG_TOP_RATIO
+                out += floatArrayOf(0f, top, 0.6f, (top + 0.12f).coerceAtMost(1f))
+            }
+        }
+
+        p.selfDrawnBounds = out
     }
 
     // ------------------------------------------------------------------ 悬浮球手势

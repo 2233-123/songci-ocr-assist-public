@@ -52,3 +52,6 @@ data/*.json
 .gradle-home/
 .jtmp/
 zzz_fresh/
+
+# 公开仓库的隔离构建目录（不参与版本控制）
+.public-build/

@@ -79,4 +79,7 @@
     <string name="quit_message">将停止读屏并移除悬浮窗。</string>
     <string name="quit_confirm">退出</string>
     <string name="quit_cancel">取消</string>
+
+    <!-- 导出日志：界面会截断长行、帧计时条数也远超界面容量，所以提供导出 -->
+    <string name="diag_export_log">导出日志（分享给开发者）</string>
 </resources>

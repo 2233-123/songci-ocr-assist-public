@@ -120,6 +120,37 @@ class FramePipeline(
     private var lastFrameHit: Boolean = false
 
     /**
+     * **App 自己绘制在屏幕上的区域**（归一化坐标 0..1，与 [TextBlock] 同基准）。
+     *
+     * 由 `OverlayService` 在布局后写入。这些区域里的文字是**我们自己画的**
+     * （状态条 `应选：X…`、调试面板），绝不能参与"找游戏选项气泡"的判定。
+     *
+     * ### 为什么必须排除（用户反馈 + 离线验证）
+     *
+     * 用户：「择律后回到主界面，高亮框却没即时消失…旧的高亮框就会误导玩家」，
+     * 并判断「就是因为你 OCR 识别到了自己的提示框」。离线验证这条路径**成立**：
+     *
+     * ```
+     * 状态条被切成「蝶恋花」独立块  → Hit(蝶恋花, target=top=0.44)
+     * 排除自绘区域后               → PaiOnly
+     * ```
+     *
+     * 机制：状态条画的是 `应选：蝶恋花（屏上没找到选项气泡）`。OCR 一旦在括号处断块，
+     * 就产出一个**恰好等于词牌名的块**，而 `scanOptions` 的第一优先判据正是
+     * "整块恰好等于词牌名" → 框被画到 App 自己的文案上。
+     *
+     * 更糟的是会**自锁**：框画到状态条上 → 状态条文字被 OCR 读回 → 判定继续命中 →
+     * `HIGHLIGHT_TTL_MS` 不断被重置 → **框永远不消失**（正是用户看到的现象）。
+     *
+     * 用「自己画在哪」来排除，比靠坐标阈值猜可靠得多 —— 这个信息本来就是已知的。
+     *
+     * 类型用 `List<FloatArray>`（`[left, top, right, bottom]`，归一化）而不是
+     * `RectF`：后者是 Android 类，会让 JVM 单测无法构造这个值来验证排除逻辑。
+     */
+    @Volatile
+    var selfDrawnBounds: List<FloatArray> = emptyList()
+
+    /**
      * 最近一帧的匹配结论（诊断用，始终是最新一次的评估结果，**不走冷却缓存**）。
      *
      * 出框失败时，事件日志里靠它区分"OCR 没读到首句"和"读到了但匹配不上"。
@@ -359,27 +390,77 @@ class FramePipeline(
         // 索引还没加载完（启动瞬间）→ 本帧无结论，不报错
         val verseIndex = index() ?: return Evaluated(FrameOutcome.Empty, fromCache = false)
 
-        // 诊断用：顶部区域实际读到的文本（未命中时也要能看到，否则只能猜）
-        val topSample = Matcher.topTextSample(blocks)
+        // **先剔掉 App 自己画的那片区域里的文字**（状态条 / 调试面板）。
+        // 详见 [selfDrawnBounds] 的说明：不排除的话，状态条里的词牌名会被当成气泡，
+        // 而且会自锁导致高亮框永不消失 —— 这正是用户反馈的现象。
+        val selfDrawn = selfDrawnBounds
+        val usable = if (selfDrawn.isEmpty()) blocks else blocks.filterNot { b ->
+            val p = b.normalized()
+            selfDrawn.any { r ->
+                p.centerX >= r[0] && p.centerX <= r[2] &&
+                    p.centerY >= r[1] && p.centerY <= r[3]
+            }
+        }
+        if (usable.isEmpty()) {
+            cachedOutcome = null
+            cachedVerseId = -1
+            return Evaluated(FrameOutcome.NoMatch, fromCache = false)
+        }
 
-        val head = Matcher.scanHead(blocks, verseIndex)
+        // 诊断用：顶部区域实际读到的文本（未命中时也要能看到，否则只能猜）
+        val topSample = Matcher.topTextSample(usable)
+
+        val head = Matcher.scanHead(usable, verseIndex)
         if (head !is HeadMatch.Hit) {
             cachedOutcome = null
             cachedVerseId = -1
             return Evaluated(FrameOutcome.NoMatch, fromCache = false, headText = topSample)
         }
 
-        // 冷却期：同一局结果不变，直接复用上次结论（省一次第二段 OCR）
+        // 冷却期复用：**只复用"命中"结论，绝不复用"没找到气泡"**。
+        //
+        // ### 这里曾经有个影响很大的 bug（用户反馈「开面板很快、关掉很慢」）
+        //
+        // 原实现的条件是「冷却期内 + 词牌相同」就返回缓存，而缓存里存的可能是
+        // `PaiOnly`（"认出了词牌，但屏上没找到气泡"）。**那本来是一个要去重试的
+        // 失败状态，却被当成结论复用了 `HIT_COOLDOWN_MS`（3000ms）。**
+        //
+        // 更糟的是 `matchNow` 里 `inCooldown = !debug && ...`：调试面板开着时
+        // debug=true → `inCooldown` 永远 false → 每帧都重新扫气泡 → 立刻出框。
+        // 所以**开面板反而更快**，且真机日志里每题出现约 2.5~3.2 秒的固定等待
+        // （正好等于冷却期长度）。
+        //
+        // 修法：只有缓存是"完整命中"（气泡也找到了）时才复用。
+        // 冷却的本意（同一局结果不变、省一次第二段扫描）本来就只对成功结论成立。
         val cached = cachedOutcome
-        if (inCooldown && cached != null && cachedVerseId == head.verse.id) {
-            return Evaluated(cached, fromCache = true, headText = head.matchedText,
+        val cachedComplete = cached is FrameOutcome.Hit
+        if (inCooldown && cachedComplete && cachedVerseId == head.verse.id) {
+            return Evaluated(cached!!, fromCache = true, headText = head.matchedText,
                 pai = head.verse.pai, similarity = head.similarity)
         }
 
-        val midBlocks = FramePreprocessor.midArea(blocks)
+        // 用 **usable**（已剔除 App 自绘区域）而不是原始 blocks —— 否则状态条里
+        // 的词牌名仍会被 scanOptions 选中，框又画回自己的文案上（见 selfDrawnBounds）。
+        val midBlocks = FramePreprocessor.midArea(usable)
         val target = Matcher.scanOptions(midBlocks, head.verse.pai, verseIndex)
-            ?: Matcher.scanOptions(blocks, head.verse.pai, verseIndex)
+            ?: Matcher.scanOptions(usable, head.verse.pai, verseIndex)
         val outcome = if (target == null) {
+            // 诊断：真机日志里出现过「气泡明明在同一帧的 frame.ocr 明细中、坐标也在
+            // 0.30~0.80 区间内，却报未找到」。离线用真机原文块复现不出来（Matcher.match、
+            // FramePipeline.evaluate、像素空间映射三条路径都判 Hit），说明"日志里看到的块"
+            // 与"匹配时真正拿到的块"存在差异。把匹配那一刻的实况打出来才能定死。
+            if (MatcherDebug.enabled) {
+                MatcherDebug.log(
+                    "optMiss",
+                    "应选=${head.verse.pai} 收到${blocks.size}块 中区${midBlocks.size}块 " +
+                        "中区块=[${midBlocks.joinToString(" ") {
+                            "%.2f:%s".format(it.normalized().centerY, it.text.take(6))
+                        }}] " +
+                        "全区含该词牌=${blocks.any {
+                            VerseIndex.normalize(it.text) == VerseIndex.normalize(head.verse.pai)
+                        }}",
+                )
+            }
             FrameOutcome.PaiOnly(head.verse.pai, head.matchedText, head.similarity)
         } else {
             FrameOutcome.Hit(head.verse.pai, head.matchedText, head.similarity, target)

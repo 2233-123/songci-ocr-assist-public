@@ -383,6 +383,15 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(logButton, marginTop(dp(4)))
 
+        // 导出日志：把「混杂事件 + 逐帧计时」写成一个 txt 并拉起系统分享，
+        // 用户可以直接发微信/QQ/邮件。比截图可靠 —— 界面会截断长行，
+        // 而且 8fps 下帧计时条数远超界面能显示的条数。
+        val exportButton = Button(this).apply {
+            text = getString(R.string.diag_export_log)
+            setOnClickListener { exportLog() }
+        }
+        root.addView(exportButton, marginTop(dp(4)))
+
         val buttons = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -455,5 +464,47 @@ class MainActivity : AppCompatActivity() {
             setOnClickListener { onClick() }
         })
         return card
+    }
+
+    /**
+     * 把事件日志 + 逐帧计时导出成一个 txt，并拉起系统分享面板。
+     *
+     * 用 `FileProvider` 内容 URI 而不是 `file://`：Android 7 起直接传 file URI 会抛
+     * `FileUriExposedException`。`cacheDir/logs` 由 `file_paths.xml` 暴露。
+     */
+    private fun exportLog() {
+        val text = EventLog.export().ifEmpty { "（日志为空）" }
+        val dir = java.io.File(cacheDir, "logs").apply { mkdirs() }
+        val stamp = java.text.SimpleDateFormat("MMdd-HHmmss", java.util.Locale.US)
+            .format(java.util.Date())
+        val file = java.io.File(dir, "songci-log-$stamp.txt")
+        runCatching {
+            file.writeText(text)
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                this,
+                "$packageName.fileprovider",
+                file,
+            )
+            startActivity(
+                Intent.createChooser(
+                    Intent(Intent.ACTION_SEND).apply {
+                        type = "text/plain"
+                        putExtra(Intent.EXTRA_STREAM, uri)
+                        putExtra(Intent.EXTRA_SUBJECT, "宋词择律提示器 日志")
+                        // 正文也塞一份：有些 App 只收文本、不处理附件
+                        putExtra(Intent.EXTRA_TEXT, text.take(20_000))
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    },
+                    getString(R.string.diag_export_log),
+                ),
+            )
+        }.onFailure {
+            // 分享失败也不能白费：退回把全文显示在诊断框里，至少能截图
+            diagBox.visibility = View.VISIBLE
+            diagBox.text = text.take(20_000)
+            android.widget.Toast
+                .makeText(this, "分享失败，已显示在下方：${it.javaClass.simpleName}", android.widget.Toast.LENGTH_LONG)
+                .show()
+        }
     }
 }

@@ -14,25 +14,29 @@ import kotlin.math.roundToInt
  *
  * 只负责画，不判断对错（判断在 [Matcher]）。
  *
- * ### 为什么不用「全屏窗口」
+ * ### 关于「全屏窗口」的一段弯路（值得记下来）
  *
- * 早期实现是一个 `MATCH_PARENT` 的全屏悬浮窗，虽然带 `FLAG_NOT_TOUCHABLE`，
- * 但实测在**华为 HarmonyOS** 上会导致下层游戏收不到点击（华为开发者论坛有
- * 同类记录，属 OEM 对"触摸遮挡"的实现差异）。
+ * 早期实现是 `MATCH_PARENT` 全屏悬浮窗，带 `FLAG_NOT_TOUCHABLE`，但实测在
+ * **华为 HarmonyOS** 上下层游戏收不到点击（OEM 对"触摸遮挡"的实现差异）。
  *
- * 所以改为**按内容定尺寸的窄窗口**：窗口只覆盖"要高亮的那一小块 + 状态条"，
- * 并且**没有内容时窗口零尺寸**。这样即使在会误判遮挡的 ROM 上，也几乎不可能
- * 挡住游戏按钮 —— 从根源上消除这个风险，而不是依赖 `FLAG_NOT_TOUCHABLE` 被正确实现。
+ * 当时的修法是**把窗口缩小成「贴合内容包围盒」的窄窗口，且无内容时零尺寸**。
+ * 这确实绕开了遮挡问题，但带来两个后果：
  *
- * 因为窗口不再是全屏，本 view 的绘制坐标**以窗口左上角为原点**，
- * 所以需要一个「内容矩形 → 窗口坐标」的偏移（见 [contentOriginX] / [contentOriginY]）。
+ * 1. **框会从左上角飞过来** —— 悬浮窗的 `params.x/y/width/height` 一变，
+ *    `WindowManager` 就播放窗口移动动画。用户明确要求「直接出现在对应位置」。
+ * 2. 窗口尺寸在 0 与非 0 之间反复跳变，可能让合成链路走低效路径
+ *    （真机 A/B：0×0 时 OCR 中位 217ms / 受理 2.5/s，保持 1×1 时 141ms / 5.9/s）。
+ *
+ * **正确的修法应该是保留全屏窗口 + 依赖 `FLAG_NOT_TOUCHABLE`**，而当年选择了绕开。
+ * 现在已改回**恒定整屏窗口**（触摸穿透靠 flag），根除动画；
+ * 详见 `OverlayService.applyOverlayLayout` 的注释。
  */
 class OverlayView(context: Context) : View(context) {
 
     /**
      * 窗口布局：窗口在屏幕上的像素位置与尺寸，以及绘制原点偏移。
      *
-     * - 窗口尺寸 = 内容包围盒（高亮框 / 状态条 / 调试面板）向外扩 [PADDING_PX]
+     * - [x]/[y]/[width]/[height]：窗口几何。**当前恒为整屏 + (0,0)**，见类注释
      * - [contentOriginX]/[contentOriginY] = 内容坐标系的原点在窗口内的位置
      *   （内容坐标系用的是**全屏**尺寸，与 [HighlightRect] 的归一化基准一致）
      */
@@ -50,7 +54,33 @@ class OverlayView(context: Context) : View(context) {
         val visible: Boolean get() = width > 0 && height > 0
 
         companion object {
-            val HIDDEN = WindowLayout(0, 0, 0, 0, 0, 0, 0, 0)
+            /**
+             * 无内容时的窗口尺寸：**1×1 像素，而不是 0×0**。
+             *
+             * ### 为什么不能是 0×0（真机实测）
+             *
+             * 同一台手机上对比两段日志（面板开 vs 关，各数百帧）：
+             *
+             * ```
+             * 面板开: 帧间隔中位 250ms (3.4 fps)   OCR 中位 185ms
+             * 面板关: 帧间隔中位 265ms (2.5 fps)   OCR 中位 217ms
+             * ```
+             *
+             * 面板开着时悬浮窗**持续有内容**（每帧重画四行诊断文字），关闭时窗口
+             * 收缩到 0×0。两者 OCR 耗时差 17%、吞吐差 26% —— 方向与用户
+             * 「开面板很快、关掉很慢」的观察一致。
+             *
+             * 推断的机制：尺寸为 0 的窗口会让系统合成链路进入另一种路径，
+             * `VirtualDisplay` 可能重复投递同一帧（同样的像素再 OCR 一遍，
+             * 所以"帧还是 55~67 次/秒"，但每帧的实际开销变高）。
+             *
+             * **这是一个待验证的假设**，所以本改动刻意做得最小、可回退：
+             * 只把 0×0 换成 1×1，窗口位置与透明性都不变，不影响任何显示效果。
+             */
+            val IDLE = WindowLayout(0, 0, 1, 1, 0, 0, 0, 0)
+
+            /** 兼容旧名：语义等同于 [IDLE] */
+            val HIDDEN = IDLE
         }
     }
 
@@ -112,6 +142,26 @@ class OverlayView(context: Context) : View(context) {
         contentW = layout.screenW
         contentH = layout.screenH
         invalidate()
+    }
+
+    /**
+     * 几何自述（诊断用）。
+     *
+     * 「窗口恒整屏」改造后出现过"框只画在左上角"，需要在真机上看清这几个量的关系：
+     * - `w/h`：**view 实测尺寸**（即窗口实际给了多大画布）
+     * - `cW/cH`：**绘制用的内容坐标尺寸**（`applyLayout` 里从 layout.screenW/H 来）
+     * - `ox/oy`：画布平移原点
+     * - `hl`：高亮目标的归一化矩形
+     *
+     * 若 `w == cW`（且 ox=oy=0），则内容坐标 == 画布坐标，框应出现在正确位置；
+     * 若两者不等，就是尺寸来源不一致 —— 那才是"框跑到左上角"的原因。
+     */
+    fun geometryDesc(): String {
+        val h = highlight
+        return "view=%dx%d content=%dx%d origin=(%d,%d) hl=%s".format(
+            width, height, contentW, contentH, originX, originY,
+            h?.let { "(%.2f,%.2f,%.2f,%.2f)".format(it.left, it.top, it.right, it.bottom) } ?: "null",
+        )
     }
 
     private val framePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -263,8 +313,13 @@ class OverlayView(context: Context) : View(context) {
         /** 箭头向左伸出多少 dp（用于算窗口左边界） */
         private const val ARROW_REACH_DP = 20f
 
-        /** 调试面板在屏幕高度上的位置比例 */
-        private const val DEBUG_TOP_RATIO = 0.45f
+        /**
+         * 调试面板在屏幕高度上的位置比例。
+         *
+         * **公开**：`OverlayService` 要把这块区域报给流水线排除掉 ——
+         * 否则面板文字可能被当成游戏选项气泡（见 `FramePipeline.selfDrawnBounds`）。
+         */
+        const val DEBUG_TOP_RATIO = 0.45f
 
         /**
          * 由内容包围盒算出窗口布局。

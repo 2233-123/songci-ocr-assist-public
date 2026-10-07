@@ -69,13 +69,37 @@ class FramePipelineTest {
     }
 
     @Test
-    fun `取帧节流_500ms 内只受理一帧`() {
+    fun `取帧节流_一个间隔内只受理一帧`() {
         val p = pipeline()
         assertTrue(p.shouldAcceptFrame(now))
         p.markAccepted(now)
         assertFalse("同一时刻不能接着受理", p.shouldAcceptFrame(now))
-        assertFalse("200ms 后仍然太快", p.shouldAcceptFrame(now + 200))
-        assertTrue("500ms 后可以受理", p.shouldAcceptFrame(now + Config.MIN_FRAME_INTERVAL_MS))
+        // 间隔的一半时刻必须仍然被挡（用比例而不是硬编码毫秒，间隔调整后测试仍然有效）
+        val half = now + Config.MIN_FRAME_INTERVAL_MS / 2
+        assertFalse("间隔未到时仍然太快", p.shouldAcceptFrame(half))
+        assertTrue(
+            "到达间隔后可以受理",
+            p.shouldAcceptFrame(now + Config.MIN_FRAME_INTERVAL_MS),
+        )
+    }
+
+    @Test
+    fun `节流间隔应与目标帧率一致_且明显快于省电模式`() {
+        // 真机基准实测 OCR 只要 ~113ms，节流间隔过大会成为唯一限速器。
+        // 这条测试把"间隔 = 1/fps"的契约固定下来，避免以后改 fps 忘了同步。
+        assertEquals(
+            (1000.0 / Config.FPS_NORMAL).toLong(),
+            Config.MIN_FRAME_INTERVAL_MS,
+        )
+        assertTrue(
+            "正常模式必须比省电模式快",
+            Config.MIN_FRAME_INTERVAL_MS < Config.IDLE_FRAME_INTERVAL_MS,
+        )
+        // 高亮存活时间必须大于省电间隔，否则 0.5fps 下框会闪没（原有约束）
+        assertTrue(
+            "高亮存活时间必须大于省电帧间隔",
+            Config.HIGHLIGHT_TTL_MS > Config.IDLE_FRAME_INTERVAL_MS,
+        )
     }
 
     @Test
