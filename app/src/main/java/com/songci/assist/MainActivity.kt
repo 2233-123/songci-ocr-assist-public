@@ -19,6 +19,7 @@ import android.view.ViewGroup
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
+import android.widget.SeekBar
 import android.widget.Switch
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
@@ -359,6 +360,8 @@ class MainActivity : AppCompatActivity() {
         root.addView(debugSwitch)
         root.addView(hint(getString(R.string.pref_debug_hint)))
 
+        root.addView(perfSection())
+
         // 诊断结果：显示在 App 自己界面上，**不依赖悬浮层**
         // （悬浮层要是画不出来，这里仍然能看到 OCR 读到了什么）
         diagBox = TextView(this).apply {
@@ -420,6 +423,104 @@ class MainActivity : AppCompatActivity() {
         this.text = text
         textSize = sizeSp
         setPadding(0, 0, 0, (8 * resources.displayMetrics.density).toInt())
+    }
+
+    /**
+     * **性能**设置分区（用户需求）。
+     *
+     * 两个设置项：
+     *
+     * 1. **取帧频率** —— 档位按钮 1/2/4/8/15/不限速，外加一个吸附到档位的滑动条。
+     *    改完立刻热更新（`CaptureService.applyPerfPrefs`），不必重开投屏。
+     * 2. **命中后暂停密集取帧** —— 高亮框指向正确选项后把取帧放慢到 1 秒一次，
+     *    等玩家点击再恢复；开关可关（关掉就等于旧行为）。
+     *
+     * ### 为什么用"按钮 + 吸附滑条"而不是纯滑条
+     *
+     * 档位是离散的（用户不需要 7.3 fps）。按钮给出**一眼可读的档位名**，
+     * 滑条给出**连续手感但吸附到档位**，两者指向同一个值，不会互相矛盾。
+     */
+    private fun perfSection(): View {
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        // dp 是 onCreate 内的局部函数，这里按需自建（保持方法可独立调用）
+        val density = resources.displayMetrics.density
+        fun dp(v: Int) = (v * density).toInt()
+
+        box.addView(title(getString(R.string.perf_title), 17f))
+        box.addView(hint(getString(R.string.perf_desc)))
+
+        // ---------------- 设置项 1：取帧频率 ----------------
+        val fpsValue = TextView(this).apply { textSize = 14f }
+        val choices = Config.FPS_CHOICES
+        // 档位 → 滑条刻度：用下标而不是 fps 值，避免 0（不限速）与 1 fps 之间距离失真
+        val initIndex = choices.indexOf(PerfPrefs.fps(this)).coerceAtLeast(0)
+
+        fun describe(fps: Int): String = if (fps <= 0) {
+            getString(R.string.perf_fps_unlimited_desc)
+        } else {
+            getString(R.string.perf_fps_value, fps, Config.intervalMsForFps(fps))
+        }
+
+        fun apply(fps: Int) {
+            PerfPrefs.setFps(this, fps)
+            fpsValue.text = describe(fps)
+            CaptureService.applyPerfPrefs(this)
+        }
+
+        box.addView(TextView(this).apply {
+            text = getString(R.string.perf_fps_title)
+            textSize = 15f
+            setPadding(0, dp(6), 0, 0)
+        })
+        fpsValue.text = describe(choices[initIndex])
+        box.addView(fpsValue)
+
+        val chips = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(4), 0, 0)
+        }
+        val chipViews = ArrayList<Button>(choices.size)
+        val slider = SeekBar(this).apply {
+            max = choices.size - 1
+            progress = initIndex
+        }
+        choices.forEachIndexed { index, fps ->
+            val b = Button(this).apply {
+                text = Config.fpsLabel(fps)
+                textSize = 12f
+                setPadding(dp(2), 0, dp(2), 0)
+                setOnClickListener {
+                    slider.progress = index
+                    apply(fps)
+                }
+            }
+            chipViews += b
+            chips.addView(b, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        box.addView(chips)
+        slider.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+            override fun onProgressChanged(sb: SeekBar?, progress: Int, fromUser: Boolean) {
+                if (fromUser) apply(choices[progress])
+            }
+            override fun onStartTrackingTouch(sb: SeekBar?) = Unit
+            override fun onStopTrackingTouch(sb: SeekBar?) = Unit
+        })
+        box.addView(slider)
+        box.addView(hint(getString(R.string.perf_fps_hint)))
+
+        // ---------------- 设置项 2：命中后降速 ----------------
+        val slowSwitch = Switch(this).apply {
+            text = getString(R.string.perf_slowdown_title)
+            isChecked = PerfPrefs.slowdownAfterHit(this@MainActivity)
+            setOnCheckedChangeListener { _, checked ->
+                PerfPrefs.setSlowdownAfterHit(this@MainActivity, checked)
+                CaptureService.applyPerfPrefs(this@MainActivity)
+            }
+        }
+        box.addView(slowSwitch, marginTop(dp(6)))
+        box.addView(hint(getString(R.string.perf_slowdown_hint)))
+
+        return box
     }
 
     private fun hint(text: String) = TextView(this).apply {

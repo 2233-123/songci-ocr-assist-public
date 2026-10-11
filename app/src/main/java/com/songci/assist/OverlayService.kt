@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
@@ -145,11 +146,28 @@ class OverlayService : Service() {
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    // **监听"玩家在别处点了一下"**（需求3第二项）。
+                    //
+                    // FLAG_WATCH_OUTSIDE_TOUCH 只让我们**收到** ACTION_OUTSIDE，
+                    // 不会消费任何触摸 —— 配合 FLAG_NOT_TOUCHABLE，游戏照常收到点击。
+                    // 收到后转成 CaptureService.notifyUserTouch()，结束「命中后降速」。
+                    WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
                 PixelFormat.TRANSLUCENT,
             ).apply {
                 gravity = Gravity.TOP or Gravity.START
                 alpha = Config.OVERLAY_WINDOW_ALPHA
+                windowAnimations = 0
+            }
+            // ACTION_OUTSIDE 只在本窗口是"触摸会经过的那一层"时才送达。
+            // 这里故意**不**用 setOnTouchListener（那会消费事件），而是在
+            // onTouchEvent 之外单独挂一个 listener：本窗口带 NOT_TOUCHABLE，
+            // 系统只会把 ACTION_OUTSIDE 发给它，其余事件不会到达，所以不影响游戏。
+            view.setOnTouchListener { _, e ->
+                if (e.actionMasked == MotionEvent.ACTION_OUTSIDE) {
+                    onOutsideTouch(e)
+                }
+                false // 不消费
             }
             windowManager.addView(view, params)
             overlayView = view
@@ -160,25 +178,54 @@ class OverlayService : Service() {
 
         if (statusView == null) {
             val status = StatusBarView(this)
-            // **固定位置**的状态条窗口：宽度整屏、位置恒为屏幕顶部正中。
-            // 不做成随内容移动的窗口，否则高亮框一动它就跟着动（用户反馈过）。
-            // 虽然铺满屏幕宽度，但带 FLAG_NOT_TOUCHABLE（可触摸区域为空），不挡游戏。
+            // **可拖动的**状态条窗口（需求1）。
             //
-            // 注意：它也是**整屏宽**，同样会被 Android 12+ 的遮挡判定算进去，
-            // 所以 alpha 也要压到 [Config.OVERLAY_WINDOW_ALPHA]。
+            // 历史脉络（每一次都是用户反馈驱动的）：
+            // - 最初与高亮框共用一个窗口 → 高亮框一动、状态条跟着动
+            // - 拆成独立固定窗口 → 不再乱动，但**不可拖动**
+            // - 收窄到 74% 宽 → 避开左上角，修「游戏返回按钮点不动」
+            // - 现在：去掉 FLAG_NOT_TOUCHABLE，**改成可拖动**
+            //
+            // 去掉 NOT_TOUCHABLE 的代价：落在状态条上的触摸不再传给游戏。
+            // 这是"能拖动"必然的代价（悬浮球同理），而且用户拖到不想挡的地方即可。
+            //
+            // alpha 仍需压到 [Config.OVERLAY_WINDOW_ALPHA]：虽然可触摸窗口不参与
+            // "穿透遮挡"判定，但它与高亮层在顶部仍会重叠（见
+            // OverlayWindowAlphaTest 里那个 0.91 的事故）。
             val params = WindowManager.LayoutParams(
                 0,
                 0,
                 overlayType(),
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                    // **允许把窗口放到屏幕外**（FloatingX 的 LP 默认值也含它）。
+                    //
+                    // 没有它时窗口被限制在屏内，"拖出屏幕/半隐"这类交互做不了；
+                    // 它的 issue #235（允许出界）与 #188（拖不到底）都在这一点上。
+                    // 出界范围由 clampStatusPos 在应用层控制，不会真的丢窗口。
+                    WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                 PixelFormat.TRANSLUCENT,
             ).apply {
+                // **纵向基准用 TOP**：`params.y` 就是屏幕坐标，**与窗口高度无关**。
+                // 用 BOTTOM 会让位置依赖高度，而高度必然会变（有文案↔没文案），
+                // 于是窗口反复跳、甚至被跳出屏幕（用户报"长条框有时突然消失"）。
+                // "能拖到底"改由 FLAG_LAYOUT_NO_LIMITS + clampStatusPos 保证。
                 gravity = Gravity.TOP or Gravity.START
                 alpha = Config.OVERLAY_WINDOW_ALPHA
+                // **关掉窗口自身的动画**：`updateViewLayout` 会播放一次窗口位移动画，
+                // 移动期间旧位置的内容已不绘制、新位置还没到 —— 用户看到的就是
+                // "长条框突然消失一下又回来"。
+                //
+                // 同类问题（CSDN《WindowManager 的 updateViewLayout取消动画效果》）：
+                // 「悬浮窗移动后再点击按钮，悬浮窗会从移动前的位置移动到移动后的位置」，
+                // 其解法是反射设 `PRIVATE_FLAG_NO_MOVE_ANIMATION`。那个字段是私有的，
+                // 这里改用**公开 API** `windowAnimations = 0`（不依赖反射，不会被厂商 ROM 拦），
+                // 效果等价：窗口不使用进出/移动动画。
+                windowAnimations = 0
             }
+            setNoMoveAnimation(params)
+            status.setOnTouchListener { v, e -> onStatusTouch(v, e, params) }
             windowManager.addView(status, params)
             statusView = status
             statusParams = params
@@ -199,7 +246,9 @@ class OverlayService : Service() {
                 gravity = Gravity.TOP or Gravity.START
                 x = prefs.getInt(PREF_BALL_X, -1)
                 y = prefs.getInt(PREF_BALL_Y, -1)
+                windowAnimations = 0
             }
+            setNoMoveAnimation(params)
             ball.setOnTouchListener { v, e -> onBallTouch(v, e, params) }
             windowManager.addView(ball, params)
             ballView = ball
@@ -352,26 +401,137 @@ class OverlayService : Service() {
         val params = statusParams ?: return
         if (destroyed) return
 
-        val screenW = resources.displayMetrics.widthPixels
-        if (screenW <= 0) return
-        val height = view.statusWindowHeightPx()
+        val screen = realDisplaySize()
+        if (screen.x <= 0) return
+        // **保留可拖动高度**：没有文案时窗口不再收成 0（那样就完全摸不到，
+        // 用户报告"屏幕上没有对应诗句后长条提示框无法拖动"）。见 StatusBarView.minDragHeightPx。
+        val height = view.statusWindowHeightPx(keepDragHandle = true)
 
         // **收窄窗口，避开左上角/右上角** —— 见 STATUS_WINDOW_WIDTH_RATIO 的注释。
-        // 位置与尺寸都是常量推导出来的，**不随内容变**，所以不会触发位移动画。
-        val w = (screenW * STATUS_WINDOW_WIDTH_RATIO).toInt().coerceAtLeast(1)
-        val x = ((screenW - w) / 2f).toInt()
+        val w = (screen.x * STATUS_WINDOW_WIDTH_RATIO).toInt().coerceAtLeast(1)
+
+        // 位置：优先用**用户拖动后保存的位置**；没拖过才用默认的"水平居中 + 距顶 TOP_DP"。
+        //
+        // ### ⚠️ 拖动过程中绝不能重算位置（修过"回弹/拖不动"）
+        //
+        // 状态条文案每帧都在变（相似度、效果文本），每次变化都会调用本方法。
+        // 而拖动期间 `params.x/y` 是**手指的实时位置**，偏好里存的还是**上一次松手的位置**
+        // —— 于是每次文案变化都把窗口拽回旧保存值，表现就是：
+        //
+        // - 拖到下方 → 立刻回弹
+        // - 有时干脆"拖不动"（被拽回的速度和拖动一样快）
+        //
+        // 所以拖动期间**只更新尺寸、不碰 x/y**。位置在松手时保存，松手后才会被这里读到。
+        if (statusDragged) {
+            if (params.width != w || params.height != height) {
+                params.width = w
+                params.height = height
+                safeUpdate(view, params)
+            }
+            // **兜底释放**：正常情况下 ACTION_UP 会把 statusDragged 置回 false。
+            // 但如果 UP 事件丢失（手势被系统打断、view 被移除等），这个标志会卡住 true，
+            // 位置就永远不再受布局管理了。这里用"最后一次 MOVE 的时间"做超时释放。
+            if (SystemClock.elapsedRealtime() - lastStatusMoveAt > STATUS_DRAG_STALE_MS) {
+                statusDragged = false
+                EventLog.log("status.drag", "拖动标志超时释放（未收到 ACTION_UP）")
+            }
+            return
+        }
+
+        val savedX = prefs.getInt(PREF_STATUS_X, Int.MIN_VALUE)
+        val savedY = prefs.getInt(PREF_STATUS_Y, Int.MIN_VALUE)
+        val defaultX = ((screen.x - w) / 2f).toInt()
+        val defaultY = (StatusBarView.TOP_DP * resources.displayMetrics.density).roundToInt()
+        // 保存的是**屏幕坐标 y（左上基准）**；写进 params 前按 gravity 换算（见 statusYFromBottom）
+        val screenY = if (savedY == Int.MIN_VALUE) defaultY else clampStatusPos(savedY, screen.y)
+        val x = if (savedX == Int.MIN_VALUE) defaultX else clampStatusPos(savedX, screen.x)
+        val y = screenYToParamsY(screenY, height, screen.y)
 
         if (params.width == w && params.height == height &&
-            params.x == x && params.y == 0
+            params.x == x && params.y == y
         ) {
             return
         }
         params.width = w
         params.height = height
         params.x = x
-        params.y = 0
+        params.y = y
         safeUpdate(view, params)
+        // **只在几何真的变化时打一次**：用户报"长条框有时突然消失"，
+        // 而消失只可能是"窗口被改成 0 高"或"被移出屏幕"这两种。
+        // 这行日志把两者都记下来（含当时的 showing 状态与文案长度），
+        // 复现一次就能直接定位，不必再靠推理。
+        if (height != lastLoggedStatusHeight || w != lastLoggedStatusWidth) {
+            lastLoggedStatusHeight = height
+            lastLoggedStatusWidth = w
+            EventLog.log(
+                "status.geom",
+                "状态条窗口 ${w}x$height @($x,$y)；barEnabled=${statusView?.barEnabled} " +
+                    "paused=$paused 文案=${statusView?.text?.length ?: -1}字 " +
+                    "可见=${statusView?.visibility == View.VISIBLE}",
+            )
+        }
+        // 尺寸或位置变了 → 检查有没有挡住首句/选项气泡（拖动后这是主要风险）
+        checkStatusBarOcclusion()
+        // **位置/尺寸变了必须重报自绘区域** —— 否则排除用的还是旧矩形，
+        // App 自己的文案落在"没被排除"的地方就会被当成游戏选项（自锁事故）。
+        publishSelfDrawnBounds()
     }
+
+    /** 上一次记录的窗口几何（用于 [applyStatusLayout] 的变化点日志去重） */
+    private var lastLoggedStatusWidth = -1
+    private var lastLoggedStatusHeight = -1
+
+    /**
+     * **状态条遮挡检测**（需求1：不限制拖动方向，改为运行时检测）。
+     *
+     * 用户明确要求状态条可以任意方向拖动，但拖到两处会出问题：
+     *
+     * | 挡住的东西 | 后果 |
+     * |---|---|
+     * | 游戏首句（y ≈ 0.19） | **OCR 读不到首句** → 识别不出新句子（v0.11.0 的事故） |
+     * | 选项气泡区（0.30~0.80） | 气泡被挡 → 找不到选项，只能显示"屏上没找到选项气泡" |
+     *
+     * 所以这里在**拖动结束**与**每次布局变化**时检查，一旦重叠就把事实记进事件日志，
+     * 并在状态条上给出提示，让用户自己挪开 —— 不强制限制拖动。
+     *
+     * 与 [guardHeadOcclusion] 的分工：那个只看"底部贴顶"这一种传统布局；
+     * 这个看任意位置下的**完整重叠**，是放开拖动后的必要补充。
+     */
+    private fun checkStatusBarOcclusion() {
+        val view = statusView ?: return
+        val params = statusParams ?: return
+        if (view.statusWindowHeightPx() <= 0) return
+
+        val screen = realDisplaySize()
+        if (screen.x <= 0 || screen.y <= 0) return
+
+        val left = params.x.toFloat() / screen.x
+        val right = (params.x + params.width).toFloat() / screen.x
+        val top = params.y.toFloat() / screen.y
+        val bottom = (params.y + params.height).toFloat() / screen.y
+
+        val problems = ArrayList<String>(2)
+        // 1) 首句带：以 GAME_HEAD_LINE_RATIO 为中心的一条窄带
+        val headTop = Config.GAME_HEAD_LINE_RATIO - Config.MIN_HEAD_CLEARANCE_RATIO * 2
+        val headBottom = Config.GAME_HEAD_LINE_RATIO + Config.MIN_HEAD_CLEARANCE_RATIO * 6
+        if (bottom > headTop && top < headBottom) problems += "游戏首句"
+        // 2) 选项气泡区
+        if (bottom > Config.OPTION_REGION_TOP && top < Config.OPTION_REGION_BOTTOM) problems += "选项气泡区"
+
+        if (problems.isEmpty()) return
+        val msg = "状态条（%.2f,%.2f-%.2f,%.2f）挡住了%s，OCR 可能读不到 → 建议拖开".format(
+            left, top, right, bottom, problems.joinToString("与"),
+        )
+        // 去重：同一位置只报一次（拖动会连续触发 layout）
+        if (msg == lastOcclusionMsg) return
+        lastOcclusionMsg = msg
+        EventLog.log("status.occlusion", msg)
+    }
+
+    /** 上一次报过的状态条遮挡描述（去重，避免拖动过程中刷爆环形缓冲） */
+    private var lastOcclusionMsg: String? = null
+
 
     override fun onDestroy() {
         destroyed = true
@@ -398,8 +558,16 @@ class OverlayService : Service() {
      *                太旧的结果丢弃，避免快速切页时画出过期的框。
      */
     fun onFrameOutcome(outcome: FrameOutcome, frameAt: Long, diag: FrameDiag? = null) {
+        // **代际快照**：暂停会让 [hideGeneration] 自增，从而作废"暂停之前发出的"所有回调。
+        //
+        // 为什么需要它：OCR 是异步的，点击悬浮球那一刻，主线程消息队列里可能已经
+        // 排着若干个「已 post、尚未执行」的帧回调。只判断 `paused` 不够严密 ——
+        // 那些回调执行时 paused 已是 true 会被拦住，但如果**暂停之后**又有新帧
+        // 在极短时间内到达（例如触摸事件与帧回调交错），仍可能把框重新画回来。
+        // 代际计数让"暂停前的那一批"整批失效，语义比单个布尔更准确。
+        val gen = hideGeneration
         main.post {
-            if (paused) return@post
+            if (paused || gen != hideGeneration) return@post
             if (frameAt > 0 && android.os.SystemClock.elapsedRealtime() - frameAt > STALE_FRAME_MS) {
                 return@post
             }
@@ -411,6 +579,13 @@ class OverlayService : Service() {
             applyOutcome(outcome)
         }
     }
+
+    /**
+     * 「隐藏代际」。每次 [hideAllTips] 自增，用于作废此前发出的帧回调。
+     *
+     * 只在主线程读写（`onFrameOutcome` 的 post 体、`hideAllTips`），所以不需要原子类型。
+     */
+    private var hideGeneration = 0L
 
     /** 调试面板内容：帧数 / 顶部 OCR / 匹配结果 / **窗口与绘制几何**。 */
     private fun diagLines(diag: FrameDiag, outcome: FrameOutcome): List<String> {
@@ -434,6 +609,11 @@ class OverlayService : Service() {
 
     private fun applyOutcome(outcome: FrameOutcome) {
         val view = overlayView ?: return
+        // **恢复可见**：hideAllTips 会把两个 view 置 GONE，这里保证一旦有新结论就重新显示。
+        // 放在绘制路径上而不是只放在"恢复取帧"那一处 —— 因为 `paused` 与 visibility
+        // 是两套状态，任何一条路径漏改都会导致浮层永久消失。
+        if (view.visibility != View.VISIBLE) view.visibility = View.VISIBLE
+        statusView?.let { if (it.visibility != View.VISIBLE) it.visibility = View.VISIBLE }
         // 每帧都从偏好同步一次：开关可能是在悬浮层已经跑起来之后才打开的，
         // 只靠 setter 会在「先点开始、后开调试」的顺序下永远看不到面板
         val dbg = debugMode
@@ -488,6 +668,15 @@ class OverlayService : Service() {
         val view = statusView ?: return
         view.barEnabled = showStatusBar
         view.paused = paused
+        // **没匹配到词句时不要让状态条消失**（用户报告："屏幕上没有匹配到对应词句
+        // 的时候长条框就是会消失"）。原因：原来这里传 null，而 StatusBarView.onDraw
+        // 的判据是 `if (!showing || t.isNullOrBlank()) return` —— 一个像素都不画。
+        //
+        // 现在改成显示弱化占位条：窗口始终在、位置始终稳、随时能抓住拖动，
+        // 同时占位样式是暗底灰字，与真实结论（亮底白字）明显不同，不会误导。
+        //
+        // 只有"用户关掉状态条"或"暂停"时才真正不显示（那两种是显式操作）。
+        view.idleNotice = text.isNullOrBlank() && showStatusBar && !paused
         view.text = text
         applyStatusLayout()
     }
@@ -566,29 +755,73 @@ class OverlayService : Service() {
      * 框在状态条上 → 文字被读回 → 继续命中 → `HIGHLIGHT_TTL_MS` 不断重置 → 框永不消失。
      *
      * 所以这里把两个自绘区域报上去：
-     * - **状态条**：屏幕顶部整条（高度按内容自适应）
+     * - **状态条**：它**实际所在的那块矩形**（可拖动后不再是"顶部整条"）
      * - **调试面板**：`OverlayView` 里固定在 `DEBUG_TOP_RATIO` 起的一块
+     *
+     * ### ⚠️ 状态条必须按**实际位置**上报（放开拖动后的关键修正）
+     *
+     * 原来这里写死 `floatArrayOf(0f, 0f, 1f, bottomRatio)` —— 假定状态条永远是
+     * "屏幕顶部整条"。状态条一旦可拖动，这个假定就不成立：
+     * 拖到别处后它**实际画的位置没被排除** → OCR 把 App 自己的文案读回来 →
+     * `scanOptions` 命中里面的词牌名 → 框画到自己文字上 →
+     * 文字被读回又继续命中 → **框永不消失**（v0.10.x 那个自锁事故会原样复发）。
+     *
+     * 所以改成读 `statusParams` 的真实几何。这一条是放开拖动的前置条件，
+     * 由 `StatusBarSelfDrawnBoundsTest` 守护。
      */
     private fun publishSelfDrawnBounds() {
         val p = PipelineHolder.get() ?: return
-        val screenH = realDisplaySize().y.coerceAtLeast(1)
+        val screen = realDisplaySize()
+        val screenH = screen.y.coerceAtLeast(1)
+        val screenW = screen.x.coerceAtLeast(1)
         val out = ArrayList<FloatArray>(2)
 
-        // 1) 状态条：顶部整条（高度按内容自适应）
+        // 1) 状态条：**按窗口实际矩形**上报（拖动后位置会变）
         statusView?.let { sv ->
-            if (showStatusBar && !sv.text.isNullOrBlank()) {
-                val h = sv.statusWindowHeightPx().coerceAtLeast(1)
-                val bottomRatio = (h.toFloat() / screenH).coerceIn(0f, 0.5f)
-                out += floatArrayOf(0f, 0f, 1f, bottomRatio)
-                guardHeadOcclusion(bottomRatio, h)
+            val params = statusParams
+            if (showStatusBar && !sv.text.isNullOrBlank() && params != null) {
+                val left = (params.x.toFloat() / screenW).coerceIn(0f, 1f)
+                val top = (params.y.toFloat() / screenH).coerceIn(0f, 1f)
+                val right = ((params.x + params.width).toFloat() / screenW).coerceIn(0f, 1f)
+                val bottom = ((params.y + params.height).toFloat() / screenH).coerceIn(0f, 1f)
+                if (right > left && bottom > top) {
+                    out += floatArrayOf(left, top, right, bottom)
+                }
+                // 传统"贴顶"布局下继续用原来那条哨兵（语义是"底边离首句多近"）；
+                // 拖动到别处后由 checkStatusBarOcclusion 负责，避免哨兵误报。
+                //
+                // 判据从 `params.y == 0` 改成"在默认位置"：默认 y 现在是 TOP_DP（不是 0），
+                // 用 ==0 会导致哨兵永不触发。
+                val defaultY = (StatusBarView.TOP_DP * resources.displayMetrics.density).roundToInt()
+                if (params.y == defaultY) {
+                    guardHeadOcclusion(bottom, sv.statusWindowHeightPx())
+                }
             }
         }
 
-        // 2) 调试面板：从 DEBUG_TOP_RATIO 起，占屏幕一部分
+        // 2) 调试面板：**用实测矩形**（原来是写死的 [0,0.45]-[0.6,0.57]）
+        //
+        // 写死那个有多处不对：宽 60% 屏宽、高 12% 屏高，而真实面板的宽度取决于
+        // 最长一行的实测像素宽、高度取决于行数。文字窄时排除区过大（误伤周围游戏
+        // 文字），文字宽或行数多时盖不住面板（面板文字被当成游戏选项 → 自锁）。
         overlayView?.let { ov ->
-            if (ov.debugMode && ov.debugLines.isNotEmpty()) {
-                val top = OverlayView.DEBUG_TOP_RATIO
-                out += floatArrayOf(0f, top, 0.6f, (top + 0.12f).coerceAtMost(1f))
+            ov.debugBoundsNormalized()?.let { out += it }
+        }
+
+        // 3) **悬浮球**：它也是 App 自己画的，同样要排除
+        //
+        // 之前漏了它。球上写的是「词」，通常不会撞上词牌名，所以没暴露问题；
+        // 但"自绘区域"这个概念上它算漏了一块 —— 一旦以后球上换了文案就会踩坑。
+        ballView?.let { bv ->
+            ballParams?.let { bp ->
+                if (bv.width > 0 && bv.height > 0) {
+                    out += floatArrayOf(
+                        (bp.x.toFloat() / screenW).coerceIn(0f, 1f),
+                        (bp.y.toFloat() / screenH).coerceIn(0f, 1f),
+                        ((bp.x + bv.width).toFloat() / screenW).coerceIn(0f, 1f),
+                        ((bp.y + bv.height).toFloat() / screenH).coerceIn(0f, 1f),
+                    )
+                }
             }
         }
 
@@ -688,9 +921,270 @@ class OverlayService : Service() {
 
     private val touchSlop: Int get() = ViewConfiguration.get(this).scaledTouchSlop
 
+    // ------------------------------------------------------------------ 需求3b：监听玩家点击
+
+    /** 上一次上报玩家点击的时刻（去重：一次手势可能送来多个 OUTSIDE） */
+    @Volatile
+    private var lastOutsideAt = 0L
+
+    /**
+     * 玩家在**别处**点了一下（高亮层窗口收到 `ACTION_OUTSIDE`）。
+     *
+     * ### 为什么需要它（用户需求）
+     *
+     * 「高亮框已经指向正确选项后，直到玩家下次点击前不必再持续取帧。」
+     * 玩家一点，说明他正在做选择 → 立刻结束降速，恢复正常档位，
+     * 这样下一题能第一时间出框（不用等超时兜底）。
+     *
+     * ### 为什么去重
+     *
+     * 一次手势可能产生多个 `ACTION_OUTSIDE`（多指、滑动）。这里按 200ms 合并，
+     * 避免重复打日志刷爆事件环形缓冲。
+     */
+    private fun onOutsideTouch(e: MotionEvent) {
+        val now = SystemClock.elapsedRealtime()
+        if (now - lastOutsideAt < OUTSIDE_DEDUP_MS) return
+        lastOutsideAt = now
+        CaptureService.notifyUserTouch()
+        EventLog.log("touch.outside", "玩家点击 (%.0f,%.0f) → 恢复取帧档位".format(e.rawX, e.rawY))
+    }
+
+    /** ACTION_OUTSIDE 的去重窗口 */
+    private val OUTSIDE_DEDUP_MS = 200L
+
+    // ------------------------------------------------------------------ 需求1：状态条拖动
+
+    /** 状态条拖动用：是否已进入拖动 */
+    private var statusDragged = false
+
+    /** 最近一次状态条 ACTION_MOVE 的时刻（用于拖动标志的兜底释放） */
+    private var lastStatusMoveAt = 0L
+
+    /** 拖动标志的闲置超时：超过这么久没有 MOVE 事件就认为手势已结束 */
+    private val STATUS_DRAG_STALE_MS = 2_000L
+
+    /**
+     * 状态条拖出屏幕时至少保留多少 dp 可见。
+     *
+     * 取 24dp 而不是更大的值：用户要的是"能拉到底"。24dp 约等于一个手指能按到的宽度，
+     * 既能让人把窗口拖回来，又不会在屏幕边缘留出一大段"拖不到"的距离。
+     */
+    private val STATUS_DRAG_KEEP_VISIBLE_DP = 24f
+
+    /**
+     * 状态条拖出屏幕时**至少保留多少像素可见**。
+     *
+     * ### 取自 FloatingX 的做法
+     *
+     * 参考实现 [FloatingX](https://github.com/Petterpx/FloatingX) 的 §2.3：
+     * 悬浮窗位置真值用**锚点**表达，拖动时按 `rawX/rawY` 算增量，并用
+     * `FxOverflow(top, bottom, left, right)` 显式允许出界；它的 issue
+     * **#188「拖不到底」** 就是这么治的。
+     *
+     * 关键点：夹取边界是**固定屏幕边距**，与窗口自身尺寸**无关**。
+     * 我之前的实现用 `size.y - v.height` —— 于是"能拖到哪"会随窗口高度变化，
+     * 高度一变可用范围就变，表现就是"被一条看不见的线卡住"。
+     *
+     * 现在：边界 = 屏幕范围 ± 一个固定余量，窗口尺寸不再参与计算。
+     *
+     * ### 为什么缓存起来
+     *
+     * 它被 **[onStatusTouch] 的每个 ACTION_MOVE 调用**。原来每次都读
+     * `resources.displayMetrics.density` —— MOVE 是每帧都来的热路径，重复取
+     * Resources 是没必要的开销（拖动"卡顿"的一个可能来源）。density 在进程内不变，
+     * 缓存一次即可。
+     */
+    private val statusKeepVisiblePx: Int by lazy {
+        (STATUS_DRAG_KEEP_VISIBLE_DP * resources.displayMetrics.density).roundToInt()
+    }
+
+    /**
+     * 状态条坐标夹取：允许拖出屏幕（大部分移出去也行），但**始终保留一条边可见**，
+     * 否则就再也点不到了。
+     *
+     * 边界与窗口尺寸无关 —— 见 [statusKeepVisiblePx] 的说明。
+     */
+    private fun clampStatusPos(raw: Int, screen: Int): Int {
+        val keep = statusKeepVisiblePx
+        return raw.coerceIn(-screen + keep, screen - keep)
+    }
+
+    // ------------------------------------------------------------------ 状态条的纵向基准
+
+    /**
+     * 状态条窗口用 **`Gravity.TOP or Gravity.START`**，`params.y` 就是**屏幕坐标本身**
+     * （距屏幕顶边），**与窗口高度无关**。
+     *
+     * ### 为什么不能用 `Gravity.BOTTOM`（我走过的弯路）
+     *
+     * `BOTTOM` 基准下 `params.y = screenH - screenY - height`，**位置依赖窗口高度**。
+     * 而状态条的高度必然会变（有文案 ↔ 没文案、拖动中重算），于是同一个 `screenY`
+     * 每算一次就偏一点 —— 窗口在屏幕上跳、甚至在边缘被跳出屏幕，
+     * 用户看到的就是"长条框有的时候会突然消失"。
+     *
+     * `TOP` 基准没有这个问题：`params.y == screenY`，高度怎么变位置都不动。
+     *
+     * ### "能拖到底"怎么保证
+     *
+     * 靠 `FLAG_LAYOUT_NO_LIMITS` + `clampStatusPos` 允许 `params.y` 取到屏幕高度
+     * （即窗口底边可以超出屏幕），而不是靠换 gravity。
+     *
+     * 换算函数保留成恒等，是为了让"屏幕坐标 ↔ params 坐标"的边界只有一个地方，
+     * 以后若要再换基准不必满地改。
+     */
+    private val statusYFromBottom: Boolean
+        get() = false
+
+    /** 屏幕坐标 y（左上基准）→ `params.y` */
+    private fun screenYToParamsY(screenY: Int, height: Int, screenH: Int): Int =
+        if (statusYFromBottom) screenH - screenY - height else screenY
+
+    /** `params.y` → 屏幕坐标 y（左上基准） */
+    private fun paramsYToScreenY(paramsY: Int, height: Int, screenH: Int): Int =
+        if (statusYFromBottom) screenH - paramsY - height else paramsY
+
+    /**
+     * 按下时**手指相对窗口左上角的偏移**（像素）。
+     *
+     * ### 这是拖动能不能用的关键（我第一版写错的地方）
+     *
+     * 错误实现是 `params.x = rawX - v.width/2` —— 把**窗口中心**强行对齐到手指。
+     * 状态条宽 1420px、中心在 x≈960；用户按住左端（rawX≈300）稍微一动：
+     *
+     * ```
+     * params.x = 300 - 710 = -410 → 钳到 0   → 窗口瞬移，手感上就是"拖不动"
+     * ```
+     *
+     * 正确做法：记下按下那一刻的偏移，之后 `params.x = rawX - offsetX`，
+     * 窗口就**跟着手指平移**，不会跳。
+     */
+    private var statusTouchOffsetX = 0
+    private var statusTouchOffsetY = 0
+
+    /**
+     * 状态条拖动（用户需求：「把顶部长条的那个提示框变为可以拖动的」）。
+     *
+     * ### 为什么可以直接改 `params.x/y`
+     *
+     * 窗口位置由 `WindowManager.LayoutParams.x/y` 决定（`gravity = TOP or START`），
+     * 拖动就是改这两个值再 `updateViewLayout`。**窗口尺寸不随拖动变**，
+     * 所以不会触发 WindowManager 的位移动画（那是"框飞过来"的成因）。
+     *
+     * ### 不限方向（用户明确要求）
+     *
+     * 水平与垂直都放开。垂直拖动会把状态条拖到选项气泡上的风险，由
+     * [checkStatusBarOcclusion] 在运行时**检测并告警**，而不是限制拖动。
+     */
+    private fun onStatusTouch(v: View, event: MotionEvent, params: WindowManager.LayoutParams): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                statusDragged = false
+                // **偏移必须与手指在同一坐标系里算**（屏幕左上为原点）。
+                //
+                // ### 这里曾经混用两套坐标，导致"一拖就飞走"
+                //
+                // 上一版写成 `rawY - params.y`。改成 `Gravity.BOTTOM` 之后
+                // `params.y` 是"距屏幕**底部**的偏移"，而 `rawY` 是"距屏幕**顶部**"
+                // —— 两者相减毫无意义。实测（screenH=1152, h=209）：
+                //
+                // ```
+                // offsetY = 896 - (-137) = 1033
+                // 屏幕 y  = 473 - 1033   = -560    ← 窗口飞到屏幕外（日志实测值）
+                // ```
+                //
+                // 现在先把窗口位置换算到**屏幕坐标**，再算偏移；
+                // MOVE 里也全用屏幕坐标，只在写入 `params` 时换算一次。
+                val screen = realDisplaySize()
+                val winScreenY = paramsYToScreenY(params.y, v.height, screen.y)
+                statusTouchOffsetX = event.rawX.roundToInt() - params.x
+                statusTouchOffsetY = event.rawY.roundToInt() - winScreenY
+                return true
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                val size = realDisplaySize()
+                // 窗口在屏幕上的当前位置（用于判断"相对按下点移动了多少"）
+                val winScreenY = paramsYToScreenY(params.y, v.height, size.y)
+                if (!statusDragged &&
+                    abs(event.rawX.roundToInt() - params.x - statusTouchOffsetX) +
+                    abs(event.rawY.roundToInt() - winScreenY - statusTouchOffsetY) > touchSlop
+                ) {
+                    statusDragged = true
+                }
+                if (statusDragged) {
+                    lastStatusMoveAt = SystemClock.elapsedRealtime()
+                    // 全程在**屏幕坐标**里算，最后一步才换算成 params（按 gravity）
+                    params.x = clampStatusPos(event.rawX.roundToInt() - statusTouchOffsetX, size.x)
+                    val screenY = clampStatusPos(event.rawY.roundToInt() - statusTouchOffsetY, size.y)
+                    params.y = screenYToParamsY(screenY, v.height, size.y)
+                    safeUpdate(v, params)
+                }
+                return true
+            }
+
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                if (statusDragged) {
+                    val size = realDisplaySize()
+                    // 保存的也是**屏幕坐标 y**（与默认值、clampStatusPos 同一基准），
+                    // 这样切换 gravity 时持久化数据不会错位
+                    val screenY = paramsYToScreenY(params.y, v.height, size.y)
+                    prefs.edit()
+                        .putInt(PREF_STATUS_X, params.x)
+                        .putInt(PREF_STATUS_Y, screenY)
+                        .apply()
+                    val base = if (statusYFromBottom) "BOTTOM" else "TOP"
+                    EventLog.log(
+                        "status.drag",
+                        "状态条移到 屏幕(x=${params.x}, y=$screenY)；窗口 ${v.width}x${v.height}，" +
+                            "屏幕 ${size.x}x${size.y}，params.y=${params.y}（基准=$base）",
+                    )
+                    // 拖完立刻检查有没有挡住首句/选项气泡，并重报自绘区域
+                    checkStatusBarOcclusion()
+                    publishSelfDrawnBounds()
+                }
+                statusDragged = false
+                return true
+            }
+        }
+        return false
+    }
+
     private fun safeUpdate(v: View, params: WindowManager.LayoutParams) {
         runCatching { windowManager.updateViewLayout(v, params) }
     }
+
+    /**
+     * **禁止窗口的位移动画**（"长条框突然消失一下"的根因）。
+     *
+     * ### 症状与成因
+     *
+     * `WindowManager.updateViewLayout()` 在窗口几何变化时会播放一次**窗口位移动画**。
+     * 动画期间旧位置的内容已不再绘制、新位置的内容还没到达，
+     * 于是中间那段时间窗口是**空的** —— 用户看到的就是"长条框突然消失"。
+     * 而状态条每帧都会因文案变化触发 `updateViewLayout`，所以这个现象会反复出现。
+     *
+     * ### 依据（社区同类实现）
+     *
+     * - CSDN《WindowManager 的 updateViewLayout取消动画效果》记录的现象与我们一致
+     *   （「悬浮窗移动后再点击按钮，悬浮窗会从移动前的位置移动到移动后的位置」），
+     *   解法是反射设 `PRIVATE_FLAG_NO_MOVE_ANIMATION`
+     * - FloatingX 的 `FxWindowContainer`（成熟悬浮窗库）同样关掉窗口位移动画
+     *
+     * ### 实现
+     *
+     * 1. **公开 API**：`windowAnimations = 0`（不依赖反射，必生效）
+     * 2. **反射兜底**：`PRIVATE_FLAG_NO_MOVE_ANIMATION` 精确对应"移动动画"，
+     *    公开 API 关不掉它。反射失败只影响观感，所以整段 `runCatching`。
+     */
+    private fun setNoMoveAnimation(p: WindowManager.LayoutParams) {
+        runCatching {
+            val f = p.javaClass.getField("privateFlags")
+            f.setInt(p, f.getInt(p) or PRIVATE_FLAG_NO_MOVE_ANIMATION)
+        }
+    }
+
+    /** `WindowManager.LayoutParams.PRIVATE_FLAG_NO_MOVE_ANIMATION`（隐藏字段）的常量值 */
+    private val PRIVATE_FLAG_NO_MOVE_ANIMATION = 0x00000040
 
     /** 靠近边缘时吸附，并持久化位置。 */
     private fun snapAndSave(v: View, params: WindowManager.LayoutParams) {
@@ -706,6 +1200,8 @@ class OverlayService : Service() {
         params.y = params.y.coerceIn(0, maxY)
         safeUpdate(v, params)
         prefs.edit().putInt(PREF_BALL_X, params.x).putInt(PREF_BALL_Y, params.y).apply()
+        // 球的位置变了 → 自绘区域跟着变（球也在排除名单里，见 publishSelfDrawnBounds）
+        publishSelfDrawnBounds()
     }
 
     /** 首次显示时把球放到右下角（需要知道屏幕尺寸，放在主线程做一次）。 */
@@ -738,13 +1234,81 @@ class OverlayService : Service() {
         ballView?.paused = paused
         overlayView?.paused = paused
         if (paused) {
-            overlayView?.clear()
-            setStatusText(null)
+            hideAllTips()
         } else {
+            // **恢复可见**（与 hideAllTips 的 GONE 配对，缺了它浮层就再也不出现）
+            overlayView?.visibility = View.VISIBLE
+            statusView?.visibility = View.VISIBLE
+            // 清掉"暂停前的那份结论"，等下一帧重新画
             lastOutcome = null
+            hideGeneration++      // 暂停期间的旧回调已作废；恢复后从新帧开始
         }
         EventLog.log("ball.tap", if (paused) "暂停取帧" else "开始取帧")
         Log.i(TAG, "悬浮球点击：paused=$paused")
+    }
+
+    /**
+     * **隐藏除悬浮球以外的全部提示**（高亮框 / 状态条 / 调试面板）。
+     *
+     * ### 为什么要单独抽成一个方法，并且无条件调用
+     *
+     * 用户报告：「点击悬浮球关闭取帧时，框没有全部隐藏」。
+     *
+     * 纯静态排查过整条链路（`OverlayView.onDraw` 的 `if (paused) return`、
+     * `StatusBarView.showing` 的 `!paused`、`onFrameOutcome` 的 `paused` 拦截），
+     * 逻辑上都是对的，且从 v0.10.1 起没变过 —— **不是回归**。
+     *
+     * 所以这里做两件事：
+     * 1. **把隐藏动作显式化、幂等化**：不依赖 `paused` 这条隐式链路是否被正确读到，
+     *    直接清状态 + 手动 `invalidate()` + 把状态条窗口收成 0 高。
+     *    这样即使某个 view 的 `paused` 因故没生效，隐藏结果依然成立。
+     * 2. 打**可验证的埋点**：把三个 view 的 `paused`、高亮/文案是否已清、窗口高度
+     *    一起记进事件日志 —— 下次再出问题，日志里能直接看出是哪一环没跟上，
+     *    而不是继续靠读代码猜。
+     */
+    private fun hideAllTips() {
+        // 0) 作废"暂停之前发出的"帧回调（见 onFrameOutcome 的代际说明）
+        hideGeneration++
+        // 1) 高亮框 + 调试面板：清状态 + **直接置 GONE**
+        //
+        // ### 为什么用 visibility 而不是把窗口尺寸改成 0
+        //
+        // 参考实现（以及 Android 悬浮窗的通行做法）都是 `view.visibility = GONE`：
+        // 它让 view 不绘制、不参与布局，**不依赖任何"状态计算"是否正确**。
+        //
+        // 我之前改成"清 text + 把 statusParams.height 置 0"，那要求
+        // `statusWindowHeightPx()==0` 或"强制置 0"两处都真的生效 —— 一旦某处
+        // 被提前 return 挡掉，窗口就还留着旧高度和旧画面。用 GONE 就没有这个前提。
+        overlayView?.let { ov ->
+            ov.clear()          // 连 debugLines 一起清（见 OverlayView.clear 注释）
+            ov.visibility = View.GONE
+            ov.invalidate()
+        }
+        // 2) 状态条：清文案 + GONE
+        setStatusText(null)
+        statusView?.let { sv ->
+            sv.paused = true
+            sv.text = null
+            sv.visibility = View.GONE
+            sv.invalidate()
+        }
+        // 3) 面板内容与浮层不再重画
+        lastOutcome = null
+        applyOverlayLayout()
+
+        // 4) 埋点：把三者的真实状态记下来，供下次定位
+        //    刻意**不用** String.format 的 %s（Kotlin 里传可空值会打出 "null"，
+        //    埋点本身失效过一次），改成显式拼接，缺什么一眼能看出来。
+        val overlayPart = overlayView?.let { ov ->
+            "vis=${if (ov.visibility == View.VISIBLE) "VISIBLE" else "GONE"} paused=${ov.paused} " +
+                "highlight=${if (ov.highlight == null) "已清" else "★还在"} debug=${ov.debugLines.size}"
+        } ?: "★view为空"
+        val statusPart = statusView?.let { sv ->
+            "vis=${if (sv.visibility == View.VISIBLE) "VISIBLE" else "GONE"} paused=${sv.paused} " +
+                "text=${if (sv.text.isNullOrBlank()) "已清" else "★还有${sv.text!!.length}字"} " +
+                "h=${sv.statusWindowHeightPx()}px winH=${statusParams?.height ?: -1}px"
+        } ?: "★view为空"
+        EventLog.log("ball.hide", "隐藏提示（paused=$paused）：overlay[$overlayPart] status[$statusPart]")
     }
 
     /**
@@ -802,6 +1366,15 @@ class OverlayService : Service() {
         const val PREFS = "songci_overlay"
         private const val PREF_BALL_X = "ball_x"
         private const val PREF_BALL_Y = "ball_y"
+
+        /**
+         * 状态条被拖动后保存的位置。
+         *
+         * 用 `Int.MIN_VALUE` 作"从未拖过"的哨兵值（而不是 0）—— 因为 `(0,0)` 是
+         * 一个**合法的用户位置**（拖到左上角），用 0 当默认值就区分不出这两种情况。
+         */
+        private const val PREF_STATUS_X = "status_x"
+        private const val PREF_STATUS_Y = "status_y"
         const val PREF_SHOW_STATUS = "show_status_bar"
         const val PREF_DEBUG = "debug_mode"
 

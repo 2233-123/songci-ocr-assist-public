@@ -117,6 +117,36 @@ class FramePipeline(
     var idleMode: Boolean = false
         private set
 
+    /**
+     * 用户选定的取帧档位（fps；≤0 = 不限速）。
+     *
+     * 由 `CaptureService` 在启动/偏好变化时写入。**改成运行时可变**是把原来写死的
+     * `Config.FPS_NORMAL` 交给用户调（性能设置里的滑动条/档位）。
+     */
+    @Volatile
+    var fps: Int = Config.FPS_CHOICES.getOrElse(3) { 8 }
+
+    /**
+     * 命中正确选项后进入「降速等待玩家点击」状态的截止时刻。
+     *
+     * `0` = 不在该状态。由 [noteHit] 置位，[onUserTouch] 或超时清除。
+     * 设计动机与兜底见 [Config.SLOWDOWN_AFTER_HIT_TIMEOUT_MS]。
+     */
+    @Volatile
+    private var slowdownUntil = 0L
+
+    /**
+     * 是否启用「命中后降速」（用户性能设置里的开关，见 [PerfPrefs]）。
+     *
+     * 关掉时 [noteHit] 不再置位，等价于旧行为（命中后仍按用户档位取帧）。
+     */
+    @Volatile
+    var slowdownAfterHitEnabled: Boolean = true
+
+    /** 当前是否处于「命中后降速」状态（诊断用）。 */
+    val slowingDownAfterHit: Boolean
+        get() = slowdownAfterHitEnabled && slowdownUntil > 0L && clock() < slowdownUntil
+
     /** 冷却期内复用的上一次结论（同一局结果不变，没必要反复跑第二段 OCR）。 */
     @Volatile
     private var cachedOutcome: FrameOutcome? = null
@@ -198,9 +228,35 @@ class FramePipeline(
     /** 是否允许处理该时间点的一帧（节流 + 省电模式）。 */
     fun shouldAcceptFrame(now: Long): Boolean = !busy.get() && now >= nextAllowedAt
 
+    /**
+     * 本帧应当使用的帧间隔（毫秒）。**优先级从高到低**：
+     *
+     * 1. **命中后降速**（[slowingDownAfterHit]）：等玩家点完再恢复
+     * 2. **省电模式**（[idleMode]）：连续未命中
+     * 3. 用户档位（[fps]）
+     *
+     * `0` 表示不设时间闸（只靠 `CaptureService.ocrBusy` 那道闸）。
+     */
+    fun currentIntervalMs(now: Long = clock()): Long = when {
+        slowdownAfterHitEnabled && slowdownUntil > 0L && now < slowdownUntil ->
+            Config.SLOWDOWN_AFTER_HIT_INTERVAL_MS
+        idleMode -> Config.idleIntervalMsForFps(fps)
+        else -> Config.intervalMsForFps(fps)
+    }
+
     /** 记一帧已受理，推进下一次允许的时间。 */
     fun markAccepted(now: Long) {
-        nextAllowedAt = now + if (idleMode) Config.IDLE_FRAME_INTERVAL_MS else Config.MIN_FRAME_INTERVAL_MS
+        nextAllowedAt = now + currentIntervalMs(now)
+    }
+
+    /**
+     * 玩家在屏幕上点了一下（来自悬浮层的 `ACTION_OUTSIDE`）。
+     *
+     * 立即结束「命中后降速」，让下一帧按用户档位立刻跑 ——
+     * 这是降速方案能成立的关键：不等超时，玩家一动就恢复。
+     */
+    fun onUserTouch() {
+        if (slowdownUntil != 0L) slowdownUntil = 0L
     }
 
     /**
@@ -213,13 +269,33 @@ class FramePipeline(
 
     /** 连续未命中 → 进入省电模式（只影响取帧频率）。 */
     fun noteNoHit() {
+        // 未命中说明上一局的结论已经失效（换题了）→ 结束降速等待，
+        // 否则「玩家没点、游戏自己换题」时会一直挂在降速档上
+        slowdownUntil = 0L
         if (noHitFrames.incrementAndGet() >= Config.FRAMES_BEFORE_IDLE) idleMode = true
     }
 
+    /**
+     * 记一次命中。
+     *
+     * ### 命中后降速（用户需求）
+     *
+     * 「高亮框已经指向正确选项后，直到玩家下次点击前不必再持续取帧。」
+     * 所以命中后进入降速状态，间隔变成 [Config.SLOWDOWN_AFTER_HIT_INTERVAL_MS]，
+     * 由 [onUserTouch]（玩家点击）或 [Config.SLOWDOWN_AFTER_HIT_TIMEOUT_MS]（兜底）退出。
+     *
+     * **只在「从未降速」的那一刻置位**，不在降速期间续期 ——
+     * 否则每帧命中都把截止时间往后推，永远退不出降速（这个坑在实现时想过）。
+     */
     fun noteHit(now: Long) {
         noHitFrames.set(0)
         idleMode = false
         lastHitAt = now
+        if (!slowdownAfterHitEnabled) return
+        val wasSlowingDown = slowdownUntil > 0L && now < slowdownUntil
+        if (!wasSlowingDown) {
+            slowdownUntil = now + Config.SLOWDOWN_AFTER_HIT_TIMEOUT_MS
+        }
     }
 
     // ------------------------------------------------------------------ 主流程
@@ -418,23 +494,29 @@ class FramePipeline(
         // 索引还没加载完（启动瞬间）→ 本帧无结论，不报错
         val verseIndex = index() ?: return Evaluated(FrameOutcome.Empty, fromCache = false)
 
-        // **先剔掉 App 自己画的那片区域里的文字**（状态条 / 调试面板）。
+        // **先剔掉 App 自己画的那片区域里的文字**（状态条 / 调试面板 / 悬浮球）。
         // 详见 [selfDrawnBounds] 的说明：不排除的话，状态条里的词牌名会被当成气泡，
         // 而且会自锁导致高亮框永不消失 —— 这正是用户反馈的现象。
+        //
+        // ### 判据是**重叠面积占比**，不是"中心点是否落在矩形内"（修过一个漏洞）
+        //
+        // 原实现用 `centerX/centerY` 落在自绘矩形内来判定。问题是 OCR 经常把状态条
+        // 文字与相邻内容**并成一个大块**，此时块的中心已经跑到矩形之外 → 整块都不被
+        // 排除 → 配置项里那个自锁事故照样能发生。
+        //
+        // 现在改成：块与自绘矩形的**交叠面积占块自身面积**超过
+        // [Config.SELF_DRAWN_OVERLAP_RATIO] 就排除。合并块只要有一小部分压在
+        // 状态条上就会被剔掉；而"只是挨着"的正常游戏文字不会被误伤。
         val selfDrawn = selfDrawnBounds
         val usable = if (selfDrawn.isEmpty()) blocks else blocks.filterNot { b ->
             val p = b.normalized()
-            selfDrawn.any { r ->
-                p.centerX >= r[0] && p.centerX <= r[2] &&
-                    p.centerY >= r[1] && p.centerY <= r[3]
-            }
+            selfDrawn.any { r -> FramePreprocessor.overlapRatioOf(p, r) >= Config.SELF_DRAWN_OVERLAP_RATIO }
         }
         if (usable.isEmpty()) {
             cachedOutcome = null
             cachedVerseId = -1
             return Evaluated(FrameOutcome.NoMatch, fromCache = false)
         }
-
         // 诊断用：顶部区域实际读到的文本（未命中时也要能看到，否则只能猜）
         val topSample = Matcher.topTextSample(usable)
 
@@ -572,6 +654,27 @@ class FramePipeline(
 
 /** 裁剪/过滤：只按归一化坐标判断归属，不碰像素。 */
 object FramePreprocessor {
+
+    /**
+     * **块与自绘矩形的交叠面积 / 块自身面积**（都在归一化坐标下）。
+     *
+     * 用于剔除"App 自己画的那片区域"里的 OCR 文字。之所以用面积占比而不是
+     * 中心点判定：OCR 会把相邻行并成一个大块，中心点会跑出矩形，
+     * 于是整块都排不掉（详见 `FramePipeline.selfDrawnBounds`）。
+     *
+     * @param p 文本块矩形（归一化坐标，`normalized()` 的产物）
+     * @param r 自绘区域矩形 `[left, top, right, bottom]`（归一化）
+     */
+    fun overlapRatioOf(p: TextBlock, r: FloatArray): Float {
+        val left = maxOf(p.left, r[0])
+        val top = maxOf(p.top, r[1])
+        val right = minOf(p.right, r[2])
+        val bottom = minOf(p.bottom, r[3])
+        if (right <= left || bottom <= top) return 0f
+        val inter = (right - left) * (bottom - top)
+        val own = (p.right - p.left) * (p.bottom - p.top)
+        return if (own <= 0f) 0f else inter / own
+    }
 
     /** 顶部区域：找首句用（[Config.TOP_CROP_TOP]..[Config.TOP_CROP_BOTTOM]）。 */
     fun topArea(blocks: List<TextBlock>): List<TextBlock> = blocks.filter {

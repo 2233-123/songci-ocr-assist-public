@@ -116,8 +116,16 @@ class OverlayView(context: Context) : View(context) {
             invalidate()
         }
 
+    /**
+     * 清掉全部绘制内容：高亮框**与调试面板文字**。
+     *
+     * 原来只清 `highlight`，`debugLines` 留着 —— 于是"暂停/隐藏"时如果调试面板开着，
+     * 面板文字（以及它撑起来的窗口内容）还在。语义上 `clear()` 应当是"什么都不画"，
+     * 所以两个都清。
+     */
     fun clear() {
         highlight = null
+        if (debugLines.isNotEmpty()) debugLines = emptyList()
     }
 
     private val density = resources.displayMetrics.density
@@ -255,6 +263,35 @@ class OverlayView(context: Context) : View(context) {
         val safeW = minOf(boxW, contentW.toFloat())
         val top = contentH * DEBUG_TOP_RATIO
         return RectF(dp(8f), top, dp(8f) + safeW, top + boxH)
+    }
+
+    /**
+     * 调试面板**实际**要占的屏幕矩形（归一化），供流水线排除自绘文字用。
+     *
+     * 返回 null 表示当前不显示面板。
+     *
+     * ### 为什么必须用实测而不是估算（修过一个漏洞）
+     *
+     * `OverlayService.publishSelfDrawnBounds` 原来写死 `[0, 0.45]-[0.6, 0.57]`：
+     * 宽用 60% 屏宽、高用 12% 屏高。但 [debugRectPx] 的真实宽度取决于**最长一行的
+     * 实测像素宽**、真实高度取决于**行数**：
+     *
+     * - 文字窄时 → 排除区比实际大 → **误伤旁边的游戏文字**（本该识别的被丢掉）
+     * - 文字宽或行数多时 → 排除区盖不住实际面板 → **面板文字被当成游戏选项**
+     *   → 框画到面板上并自锁（v0.10.x 那个"框永不消失"的事故路径）
+     *
+     * 所以改成把 `debugRectPx` 的真实结果报上去。由 [SelfDrawnExclusionTest] 守护。
+     */
+    fun debugBoundsNormalized(): FloatArray? {
+        if (!debugMode || debugLines.isEmpty()) return null
+        if (contentW <= 0 || contentH <= 0) return null
+        val r = debugRectPx(debugLines)
+        return floatArrayOf(
+            (r.left / contentW).coerceIn(0f, 1f),
+            (r.top / contentH).coerceIn(0f, 1f),
+            (r.right / contentW).coerceIn(0f, 1f),
+            (r.bottom / contentH).coerceIn(0f, 1f),
+        )
     }
 
     // ------------------------------------------------------------------

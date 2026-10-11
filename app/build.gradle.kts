@@ -68,6 +68,10 @@ android {
             applicationIdSuffix = ".debug"
             versionNameSuffix = "-debug"
             isMinifyEnabled = false
+            // **改显示名**：调试包与正式包会同时装在同一台设备上，两者同名同图标时
+            // 测的人根本分不清点的是哪个 —— 我已经因此连续拿到三份"旧包"的日志、
+            // 白分析了两轮。加个后缀，桌面与应用内标题都能一眼认出来。
+            resValue("string", "app_name", "宋词提示器·调试")
             if (hasDebugKeystore) {
                 signingConfig = signingConfigs.getByName("debugLocal")
             }

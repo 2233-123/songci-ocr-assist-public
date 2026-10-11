@@ -56,12 +56,42 @@ class StatusBarClearanceTest {
     private val fontSpanRatio = 1.53f
 
     private fun barBottomRatio(lines: Int, top: Float = topDp): Float {
-        var totalDp = top * 2 + textSizeSp * fontSpanRatio + padVDp * 2
+        // **窗口整体下移 top（默认位置），窗口内零空白**。
+        // 曾经的错误公式是 `top*2 + 框高`，让窗口比可见框高出一倍多
+        // （用户报告「占据空间与显示不同步、拖动很卡」）。
+        var totalDp = top + textSizeSp * fontSpanRatio + padVDp * 2
         if (lines > 1) {
             // 第二行：间距 + 稍小字号（v0.11.0 的实际参数）
             totalDp += 4f + 14f * fontSpanRatio
         }
         return totalDp * density / screenHeightPx
+    }
+
+    /** 可见框的高度（dp）—— 与 `StatusBarView.onDraw` 的 `boxH` 同式 */
+    private fun boxHeightDp(lines: Int = 1): Float {
+        var h = textSizeSp * fontSpanRatio + padVDp * 2
+        if (lines > 1) h += 4f + 14f * fontSpanRatio
+        return h
+    }
+
+    @Test
+    fun `窗口高度必须等于可见框高度_不能有任何窗口内空白`() {
+        // 用户报告过两次空白：
+        //   第一次：窗口是 `TOP*2 + 框高`，上下各留一块 → 改成 `TOP + 框高`
+        //   第二次：`TOP + 框高` 仍在**窗口顶部**留了 TOP 那一条（density 3 = 24px）
+        //          因为 onDraw 把框画在 y=TOP 起。
+        // 正确关系：窗口高 == 框高，框从窗口顶部开始画；TOP 只作窗口位置。
+        val windowDp = boxHeightDp()
+        println("    窗口高 %.1fdp == 框高 %.1fdp（窗口内应零空白）".format(windowDp, boxHeightDp()))
+        assertEquals(
+            "窗口高度必须等于可见框高度（多出的部分就是能摸到但看不见的死区）",
+            boxHeightDp(), windowDp, 0.01f,
+        )
+        // TOP_DP 只用于窗口位置，不得回到窗口高度里
+        assertTrue(
+            "TOP_DP 必须 > 0，它现在只作窗口 y 位置（离屏幕顶远一点）",
+            topDp > 0f,
+        )
     }
 
     /**

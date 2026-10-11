@@ -82,4 +82,14 @@
 
     <!-- 导出日志：界面会截断长行、帧计时条数也远超界面容量，所以提供导出 -->
     <string name="diag_export_log">导出日志（分享给开发者）</string>
+
+    <!-- 性能设置 -->
+    <string name="perf_title">性能</string>
+    <string name="perf_desc">取帧越密，出框越快，耗电与发热也越高。按机型自行取舍。</string>
+    <string name="perf_fps_title">取帧频率</string>
+    <string name="perf_fps_value">%1$d fps（约每 %2$d 毫秒一帧）</string>
+    <string name="perf_fps_unlimited_desc">不限速（只受识别耗时限制，实测约 3~10 次/秒）</string>
+    <string name="perf_fps_hint">「不限速」不会真的每帧都读——识别本身要 100~300 毫秒，那是物理上限。若追求省电，选 1~4 fps 即可。</string>
+    <string name="perf_slowdown_title">命中正确选项后暂停密集取帧</string>
+    <string name="perf_slowdown_hint">认出并框住正确选项后，放慢到每秒一帧等你作答；你一点屏幕就立刻恢复正常频率。最迟 3 秒后自动恢复（防止游戏自己换题时卡住）。</string>
 </resources>

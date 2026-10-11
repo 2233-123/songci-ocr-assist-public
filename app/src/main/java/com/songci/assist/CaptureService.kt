@@ -371,6 +371,10 @@ class CaptureService : Service() {
             effects = { IndexHolder.effects },
         ).also { p ->
             p.listener = { outcome, frameAt, diag -> deliver(outcome, frameAt, diag) }
+            // 性能设置：档位与「命中后降速」都是用户可调的，在这里注入一次，
+            // 之后偏好一变就通过 applyPerfPrefs() 热更新（不必重启投屏）
+            p.fps = PerfPrefs.fps(this)
+            p.slowdownAfterHitEnabled = PerfPrefs.slowdownAfterHit(this)
             // 让 OverlayService 能把自己绘制的区域告诉流水线（排除 App 自产文字，
             // 否则状态条里的词牌名会被当成气泡选中并自锁，见 FramePipeline.selfDrawnBounds）
             PipelineHolder.set(p)
@@ -992,6 +996,37 @@ class CaptureService : Service() {
 
         internal fun publishRunning(running: Boolean) {
             isRunning = running
+        }
+
+        /**
+         * **热更新性能设置**（用户在设置页改档位/开关后调用，不需要重启投屏）。
+         *
+         * 只改流水线里那两个 `@Volatile` 字段，下一次 [FramePipeline.markAccepted]
+         * 就会用新间隔 —— 不需要重建 pipeline，也不会打断当前这一帧。
+         */
+        fun applyPerfPrefs(context: Context) {
+            val p = PipelineHolder.get() ?: return
+            val fps = PerfPrefs.fps(context)
+            val slow = PerfPrefs.slowdownAfterHit(context)
+            val changed = p.fps != fps || p.slowdownAfterHitEnabled != slow
+            p.fps = fps
+            p.slowdownAfterHitEnabled = slow
+            if (changed) {
+                EventLog.log(
+                    "perf.apply",
+                    "取帧档位=${Config.fpsLabel(fps)}（间隔 ${Config.intervalMsForFps(fps)}ms）" +
+                        "，命中后降速=${if (slow) "开" else "关"}",
+                )
+            }
+        }
+
+        /**
+         * 玩家在屏幕上点了一下（悬浮层收到 `ACTION_OUTSIDE` 后转过来）。
+         *
+         * 作用：立刻结束「命中后降速」，恢复用户档位 —— 详见 [FramePipeline.onUserTouch]。
+         */
+        fun notifyUserTouch() {
+            PipelineHolder.get()?.onUserTouch()
         }
 
         /** 最近一帧的诊断文本（引导页显示；不依赖悬浮层能不能画出来） */

@@ -71,49 +71,149 @@ class FramePipelineTest {
     @Test
     fun `取帧节流_一个间隔内只受理一帧`() {
         val p = pipeline()
+        // 用测试自己的档位算间隔，不依赖"默认档"（默认档是用户可改的）
+        p.fps = 8
+        val interval = Config.intervalMsForFps(8)
         assertTrue(p.shouldAcceptFrame(now))
         p.markAccepted(now)
         assertFalse("同一时刻不能接着受理", p.shouldAcceptFrame(now))
         // 间隔的一半时刻必须仍然被挡（用比例而不是硬编码毫秒，间隔调整后测试仍然有效）
-        val half = now + Config.MIN_FRAME_INTERVAL_MS / 2
-        assertFalse("间隔未到时仍然太快", p.shouldAcceptFrame(half))
-        assertTrue(
-            "到达间隔后可以受理",
-            p.shouldAcceptFrame(now + Config.MIN_FRAME_INTERVAL_MS),
-        )
+        assertFalse("间隔未到时仍然太快", p.shouldAcceptFrame(now + interval / 2))
+        assertTrue("到达间隔后可以受理", p.shouldAcceptFrame(now + interval))
     }
 
     @Test
     fun `节流间隔应与目标帧率一致_且明显快于省电模式`() {
         // 真机基准实测 OCR 只要 ~113ms，节流间隔过大会成为唯一限速器。
         // 这条测试把"间隔 = 1/fps"的契约固定下来，避免以后改 fps 忘了同步。
-        assertEquals(
-            (1000.0 / Config.FPS_NORMAL).toLong(),
-            Config.MIN_FRAME_INTERVAL_MS,
-        )
-        assertTrue(
-            "正常模式必须比省电模式快",
-            Config.MIN_FRAME_INTERVAL_MS < Config.IDLE_FRAME_INTERVAL_MS,
-        )
-        // 高亮存活时间必须大于省电间隔，否则 0.5fps 下框会闪没（原有约束）
-        assertTrue(
-            "高亮存活时间必须大于省电帧间隔",
-            Config.HIGHLIGHT_TTL_MS > Config.IDLE_FRAME_INTERVAL_MS,
-        )
+        //
+        // 档位现在是**用户可调**的，所以逐个档位验证，而不是只看一个默认值。
+        for (fps in Config.FPS_CHOICES) {
+            val expect = if (fps <= 0) 0L else (1000.0 / fps).toLong()
+            assertEquals("档位 $fps 的间隔应为 1/fps", expect, Config.intervalMsForFps(fps))
+        }
+        // 省电间隔必须**大于**同档位的正常间隔（否则"省电"反而更快）
+        for (fps in Config.FPS_CHOICES) {
+            val normal = Config.intervalMsForFps(fps)
+            val idle = Config.idleIntervalMsForFps(fps)
+            assertTrue(
+                "档位 $fps：省电间隔($idle) 必须 ≥ 正常间隔($normal)",
+                idle >= normal,
+            )
+            // 高亮存活时间必须大于省电间隔上限，否则框会在两帧之间闪没
+            assertTrue(
+                "高亮存活时间(${Config.HIGHLIGHT_TTL_MS}) 必须大于省电间隔上限(${Config.IDLE_INTERVAL_MAX_MS})",
+                Config.HIGHLIGHT_TTL_MS > Config.IDLE_INTERVAL_MAX_MS,
+            )
+        }
     }
 
     @Test
-    fun `连续未命中进入省电模式_帧间隔变 2s`() {
+    fun `不限速档不设时间闸_但仍受上一帧未处理完的限制`() {
         val p = pipeline()
+        p.fps = 0
+        assertEquals("不限速档的间隔应为 0", 0L, Config.intervalMsForFps(0))
+        assertTrue(p.shouldAcceptFrame(now))
+        p.markAccepted(now)
+        // 间隔 0 ⇒ 同一时刻就允许下一帧（时间闸不拦），真正的闸是 CaptureService.ocrBusy
+        assertTrue("不限速档不该被时间闸挡住", p.shouldAcceptFrame(now))
+        assertEquals(0L, p.currentIntervalMs(now))
+    }
+
+    @Test
+    fun `连续未命中进入省电模式_使用按档位推导的省电间隔`() {
+        val p = pipeline()
+        p.fps = 8
         repeat(Config.FRAMES_BEFORE_IDLE - 1) { p.noteNoHit() }
         assertFalse("还没到次数不该进省电模式", p.idleMode)
         p.noteNoHit()
         assertTrue("到达次数后进入省电模式", p.idleMode)
 
+        val idle = Config.idleIntervalMsForFps(8)
         assertTrue(p.shouldAcceptFrame(now))
         p.markAccepted(now)
-        assertFalse("省电模式下 1s 还不该受理", p.shouldAcceptFrame(now + 1_000))
-        assertTrue("省电模式下 2s 受理", p.shouldAcceptFrame(now + Config.IDLE_FRAME_INTERVAL_MS))
+        assertFalse("省电模式下不该按正常节奏受理", p.shouldAcceptFrame(now + idle - 1))
+        assertTrue("省电间隔到达后受理", p.shouldAcceptFrame(now + idle))
+    }
+
+    @Test
+    fun `命中后降速_玩家点击立刻恢复_且有超时兜底`() {
+        val p = pipeline()
+        p.fps = 8
+        p.slowdownAfterHitEnabled = true
+        p.noteHit(now)
+        assertEquals(
+            "命中后降速期间用降速间隔",
+            Config.SLOWDOWN_AFTER_HIT_INTERVAL_MS,
+            p.currentIntervalMs(now),
+        )
+
+        // 玩家点了一下 → 立刻退出降速，回到用户档位
+        p.onUserTouch()
+        assertEquals(
+            "玩家点击后应立刻回到用户档位",
+            Config.intervalMsForFps(8),
+            p.currentIntervalMs(now),
+        )
+
+        // 再命中一次，验证**超时**兜底（不依赖点击事件）
+        p.noteHit(now)
+        assertEquals(
+            "重新命中后再次进入降速",
+            Config.SLOWDOWN_AFTER_HIT_INTERVAL_MS,
+            p.currentIntervalMs(now),
+        )
+        val after = now + Config.SLOWDOWN_AFTER_HIT_TIMEOUT_MS + 1
+        assertEquals(
+            "超过兜底时限应自动回到用户档位",
+            Config.intervalMsForFps(8),
+            p.currentIntervalMs(after),
+        )
+    }
+
+    @Test
+    fun `降速期间连续命中不会无限续期`() {
+        // 若每帧命中都把截止时间往后推，就永远退不出降速 —— 这是实现时必须避免的坑。
+        // 用 currentIntervalMs(显式时间) 断言，不用依赖真实时钟的 slowingDownAfterHit。
+        val p = pipeline()
+        p.fps = 8
+        p.slowdownAfterHitEnabled = true
+        p.noteHit(now)
+        // 在降速窗口内反复命中（每次都"还没超时"）
+        p.noteHit(now + 500)
+        p.noteHit(now + 1000)
+        // 首次命中的超时点之后必须已经恢复
+        val after = now + Config.SLOWDOWN_AFTER_HIT_TIMEOUT_MS + 1
+        assertEquals(
+            "反复命中不应把降速无限续期（应以首次命中为起点）",
+            Config.intervalMsForFps(8),
+            p.currentIntervalMs(after),
+        )
+    }
+
+    @Test
+    fun `关掉降速开关后行为回到旧版`() {
+        val p = pipeline()
+        p.fps = 8
+        p.slowdownAfterHitEnabled = false
+        p.noteHit(now)
+        assertEquals("开关关闭时不应进入降速", Config.intervalMsForFps(8), p.currentIntervalMs(now))
+    }
+
+    @Test
+    fun `未命中会结束降速_应对游戏自动换题`() {
+        // 游戏自己切题时玩家可能没点击，此时由"未命中"结束降速，避免一直挂在慢档
+        val p = pipeline()
+        p.fps = 8
+        p.slowdownAfterHitEnabled = true
+        p.noteHit(now)
+        assertEquals(Config.SLOWDOWN_AFTER_HIT_INTERVAL_MS, p.currentIntervalMs(now))
+        p.noteNoHit()
+        assertEquals(
+            "未命中应结束降速",
+            Config.intervalMsForFps(8),
+            p.currentIntervalMs(now),
+        )
     }
 
     @Test
@@ -158,9 +258,12 @@ class FramePipelineTest {
 
     @Test
     fun `Config 的自洽性`() {
-        assertTrue("高亮存活时间必须大于省电帧间隔，否则 0.5fps 下会闪",
-            Config.HIGHLIGHT_TTL_MS > Config.IDLE_FRAME_INTERVAL_MS)
-        assertTrue(Config.MIN_FRAME_INTERVAL_MS > 0)
+        assertTrue("高亮存活时间必须大于省电间隔上限，否则会闪",
+            Config.HIGHLIGHT_TTL_MS > Config.IDLE_INTERVAL_MAX_MS)
+        assertTrue("默认档位的间隔必须为正", Config.intervalMsForFps(Config.DEFAULT_FPS) > 0)
+        assertTrue("默认档位必须在可选档位里", Config.DEFAULT_FPS in Config.FPS_CHOICES)
+        assertTrue("档位表必须包含不限速档（0）", 0 in Config.FPS_CHOICES)
+        assertTrue("档位不能重复", Config.FPS_CHOICES.distinct().size == Config.FPS_CHOICES.size)
         assertTrue(Config.SIMILARITY_THRESHOLD in 0.5..1.0)
         assertTrue(Config.TOP_CROP_BOTTOM <= Config.MID_CROP_BOTTOM)
         assertTrue("同排归并阈值必须是比例", Config.LINE_X_OVERLAP_MAX in 0f..1f)

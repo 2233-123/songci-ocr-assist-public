@@ -7,37 +7,37 @@ object Config {
 
     // ------------------------------------------------------------------ 取帧
     /**
-     * 正常取帧频率。
+     * **默认**取帧档位（fps）。
      *
-     * ### 为什么从 2 fps 提到 8 fps
+     * ### 为什么曾经从 2 提到 8
      *
      * 原值是 2 fps，依据是"OCR 约 300ms/帧"的估算。**但真机基准实测 ML Kit 中文模型
      * 单帧只要 ~113ms（最快 69ms，29 帧中位）** —— 那个 300ms 的估算偏高，而
-     * `MIN_FRAME_INTERVAL_MS = 500ms` 实际上成了唯一的限速器：
+     * 500ms 的时间闸实际上成了唯一的限速器：
      *
      * ```
      * OCR 113ms  → 本可 8.8 fps
      * 节流 500ms → 强制 2 fps（83% 的时间纯空转）
      * ```
      *
-     * 提高它能让「首句出现 → 出框」的等待明显变短，代价是 CPU 占用上升。
-     * 如果实测发现耗电或发热不可接受，调回 2.0 即可。
+     * ### 现在它只是默认值
+     *
+     * 用户可在「性能」设置里改档位（见 [FPS_CHOICES]）—— 实测吞吐约 4~5 次/秒，
+     * 不同玩家对"响应速度 vs 耗电发热"的偏好不同，所以不再写死。
      */
-    const val FPS_NORMAL = 8.0
-
-    /** 省电取帧频率（长时间未命中后） */
-    const val FPS_IDLE = 0.5
+    const val DEFAULT_FPS = 8
 
     /**
-     * 帧最快处理间隔；小于它的帧直接丢弃。
+     * 旧的固定间隔常量 —— **已废弃**，仅保留给历史测试引用。
      *
-     * 注意这里**还兼作"上一帧没处理完"之外的第二道闸**：`ocrBusy` 只保证不排队，
-     * 而这个间隔决定了最小节奏。OCR 变快后它就成了瓶颈（见 [FPS_NORMAL] 注释）。
+     * 运行时一律走 [intervalMsForFps] / [idleIntervalMsForFps]（按用户档位算）。
      */
-    val MIN_FRAME_INTERVAL_MS: Long = (1000.0 / FPS_NORMAL).toLong()  // 125ms
+    @Deprecated("改用 intervalMsForFps(fps)")
+    val MIN_FRAME_INTERVAL_MS: Long = intervalMsForFps(DEFAULT_FPS)   // 125ms
 
-    /** 省电模式的帧间隔 */
-    val IDLE_FRAME_INTERVAL_MS: Long = (1000.0 / FPS_IDLE).toLong()   // 2000ms
+    /** @see MIN_FRAME_INTERVAL_MS */
+    @Deprecated("改用 idleIntervalMsForFps(fps)")
+    val IDLE_FRAME_INTERVAL_MS: Long = idleIntervalMsForFps(DEFAULT_FPS)  // 500ms
 
     /** 未命中连续多少帧后进入省电模式 */
     const val FRAMES_BEFORE_IDLE = 30
@@ -51,8 +51,7 @@ object Config {
     /**
      * 连续多久无命中后清除高亮（例如已经选完）。
      *
-     * **必须大于省电模式的帧间隔** [IDLE_FRAME_INTERVAL_MS]，否则 0.5 fps 下
-     * 每两帧之间高亮会闪一下。
+     * **必须大于省电模式的帧间隔** [IDLE_INTERVAL_MAX_MS]，否则高亮会在两帧之间闪一下。
      */
     const val HIGHLIGHT_TTL_MS = 2_500L
 
@@ -90,6 +89,121 @@ object Config {
      * 而事件环形缓冲只有 400 条 —— 记太多会把别的有用事件冲掉。
      */
     const val MAX_MISS_LOGS_PER_PAI = 3
+
+    /**
+     * **判定"这个 OCR 文本块属于 App 自绘区域"的重叠面积占比阈值**。
+     *
+     * 块与某个自绘矩形（状态条 / 调试面板 / 悬浮球）的交叠面积 ≥ 块自身面积的
+     * 这个比例时，就把该块从匹配池里剔除。
+     *
+     * ### 为什么用"面积占比"而不是"中心点落入"
+     *
+     * 原实现只看块的**中心点**是否落在自绘矩形内。但 OCR 经常把状态条文字与相邻
+     * 内容**并成一个大块**，此时块中心已经跑到矩形之外 → 整块都不被排除 →
+     * 状态条里的词牌名被当成游戏气泡选中 → 框画到自己的文案上 →
+     * 文字被读回又继续命中 → **框永不消失**（v0.10.x 那个自锁事故）。
+     *
+     * ### 为什么取 0.5
+     *
+     * - 太低（如 0.1）：只是**挨着**状态条的正常游戏文字会被误伤 → 漏识别
+     * - 太高（如 0.9）：合并块（一大半在状态条上、一小半在游戏里）排不掉 → 又漏
+     *
+     * 0.5 = "这个块有一半以上压在自绘区域里"，既能抓住合并块，又不会波及邻居。
+     */
+    const val SELF_DRAWN_OVERLAP_RATIO = 0.5f
+
+    // ------------------------------------------------------------------ 性能档位
+    /**
+     * 取帧频率的可选档位（用户可在设置里选）。
+     *
+     * ### 为什么需要它（用户需求）
+     *
+     * 原实现把 [FPS_NORMAL] 写死在代码里（8 fps）。实测吞吐只有 4~5 次/秒，
+     * 但不同玩家/机型对"响应速度 vs 耗电发热"的偏好不同，所以交给用户选。
+     *
+     * ### 「不限速」档的真实含义
+     *
+     * `fps = 0` 表示**不加时间闸**，只留"上一帧没处理完就丢"这道闸
+     * （见 `CaptureService.ocrBusy`）。它**不会**真的飙到 60 fps ——
+     * OCR 本身 100~300ms 就是物理上限，实测约 3~10 次/秒。
+     * 所以这一档实际是"让用户确认瓶颈不在时间闸"的对照档。
+     *
+     * ### 各档的间隔
+     *
+     * ```
+     * 1 fps  → 1000ms      8 fps  →  125ms
+     * 2 fps  →  500ms     15 fps  →   66ms
+     * 4 fps  →  250ms      不限速 →    0ms
+     * ```
+     */
+    val FPS_CHOICES: List<Int> = listOf(1, 2, 4, 8, 15, 0)
+
+    /** 档位显示名（0 = 不限速） */
+    fun fpsLabel(fps: Int): String = if (fps <= 0) "不限速" else "$fps fps"
+
+    /** 档位 → 帧间隔（毫秒）。**[param fps] ≤ 0 表示不限速，返回 0。** */
+    fun intervalMsForFps(fps: Int): Long =
+        if (fps <= 0) 0L else (1000.0 / fps).toLong().coerceAtLeast(1L)
+
+    /**
+     * 省电间隔：在**用户选定档位**的基础上放慢，而不是写死 2000ms。
+     *
+     * ### 为什么不能继续写死 2000ms
+     *
+     * 用户选了 1 fps 时正常间隔就是 1000ms，而写死的省电间隔 2000ms 会让
+     * "省电"变成"更慢"—— 反直觉。所以改成按倍数放慢：
+     *
+     * ```
+     * 倍率 = 4，并夹在 [最小, 最大] 之间
+     * 8 fps (125ms) → 500ms
+     * 1 fps (1000ms) → 2000ms（夹到上限）
+     * ```
+     *
+     * **上限必须小于 [HIGHLIGHT_TTL_MS]**，否则高亮会在两帧之间闪掉
+     * （这是原来写死 2000ms 时踩过的约束，见 [HIGHLIGHT_TTL_MS] 注释）。
+     */
+    fun idleIntervalMsForFps(fps: Int): Long {
+        val normal = intervalMsForFps(fps)
+        if (normal <= 0L) return IDLE_INTERVAL_MAX_MS   // 不限速档：省电时直接取上限
+        return (normal * IDLE_INTERVAL_FACTOR)
+            .coerceIn(IDLE_INTERVAL_MIN_MS, IDLE_INTERVAL_MAX_MS)
+    }
+
+    /** 省电模式相对正常模式的放慢倍率 */
+    const val IDLE_INTERVAL_FACTOR = 4L
+
+    /**
+     * 省电间隔下限。
+     *
+     * 不能太小，否则"省电"没有意义；8 fps 的 4 倍正好是 500ms，取它作下限。
+     */
+    const val IDLE_INTERVAL_MIN_MS = 500L
+
+    /**
+     * 省电间隔上限 = **1000ms**。
+     *
+     * 刻意远小于 [HIGHLIGHT_TTL_MS]（2500ms）：省电时帧与帧之间隔 1 秒，
+     * 高亮仍能在下一帧到来前保持可见，不会"一闪一闪"。
+     */
+    const val IDLE_INTERVAL_MAX_MS = 1_000L
+
+    /**
+     * 命中正确选项后，把取帧放慢到该间隔（用户需求：等玩家点完再继续）。
+     *
+     * 不是完全停止：完全停帧有两个风险（自动切题时永不恢复、点击事件漏掉时卡死），
+     * 所以用"放慢 + 玩家一点就立刻恢复 + 兜底超时"三件套，
+     * 详见 [SLOWDOWN_AFTER_HIT_TIMEOUT_MS]。
+     */
+    const val SLOWDOWN_AFTER_HIT_INTERVAL_MS = 1_000L
+
+    /**
+     * 命中后降速状态的最长维持时间；超过则自动恢复用户设定档位（兜底）。
+     *
+     * 为什么要兜底：如果游戏**自动**切到下一题（不需要玩家点击），
+     * 或注入的点击事件没被我们收到，降速状态就会一直挂着。
+     * 有这个上限，最坏情况也只是几帧之内恢复正常节奏。
+     */
+    const val SLOWDOWN_AFTER_HIT_TIMEOUT_MS = 3_000L
 
     /**
      * 悬浮层窗口自身的 alpha 上限 —— 用来**规避 Android 12+ 的「不可信触摸遮挡」拦截**。
