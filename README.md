@@ -238,11 +238,21 @@ python tools/verify_all.py       # 一键自检：索引校验 + 匹配复算 + 
 
 ### 目录结构
 
+**先看三层隔离**（Gradle 源集，目录即边界）：
+
+| 目录 | 是什么 | 会不会进 APK |
+|---|---|---|
+| `app/src/main/` | **生产代码**（22 个 Kotlin 文件，约 7100 行） | ✅ 会 |
+| `app/src/test/` | **JVM 单测**（31 个文件，约 4100 行）：断言测试 + 诊断探针 + 测试基础设施 | ❌ 不会（`testImplementation` 依赖也隔离） |
+| `tools/`、`data/`、`docs/` | **开发期工具与文档**（Python / 数据说明 / 设计文档） | ❌ 不会 |
+
+> 实测确认：发布包里**不含任何测试类**（`MatcherTest` / `TestStats` / `LiveFrameProbe` … 全部不在 dex 中）。
+
 ```
 ├── data/                        # 索引数据源（游戏导出，不入库；见 data/README.md）
 │   ├── README.md                #   格式说明 + 如何自备数据
 │   └── *.example.json           #   结构骨架（不含真实词句）
-├── tools/                       # 纯 Python 标准库，无第三方依赖
+├── tools/                       # 开发期脚本，纯 Python 标准库，无第三方依赖
 │   ├── gen_verse_index.py       #   生成 + 校验 verses.json（需要 data/）
 │   ├── gen_effect_index.py      #   生成 effects.json（需要 data/ 与效果表）
 │   ├── tune_matcher.py          #   匹配复算 / 阈值调参（与 Kotlin 同式）
@@ -250,7 +260,13 @@ python tools/verify_all.py       # 一键自检：索引校验 + 匹配复算 + 
 │   ├── check_index_committed.py #   CI：索引必须与提交版本一致
 │   └── check_apk.py             #   发布包校验（签名/权限/ABI/assets/模型）
 ├── docs/specs/                  # 设计文档（含设计意图与被实测推翻的结论）
-└── app/src/main/
+├── app/src/test/                # 单测（不进 APK）
+│   └── java/com/songci/assist/
+│       ├── *Test.kt             #   26 个断言测试（CI 必跑）
+│       ├── LiveFrame*Probe.kt   #   诊断探针（真机实收块，手工跑，打印匹配过程）
+│       ├── MatchBenchmark.kt    #   耗时基准（Assume 跳过，只量性能）
+│       └── TestStats.kt / Fixtures.kt   # 测试运行器 / 共享构造数据
+└── app/src/main/                # ── 生产代码开始 ──
     ├── AndroidManifest.xml
     ├── assets/verses.json       # 词句索引（随仓库提交）
     ├── assets/effects.json      # 词句 → 效果（**生成物，本仓库不分发**；见下）
@@ -265,7 +281,7 @@ python tools/verify_all.py       # 一键自检：索引校验 + 匹配复算 + 
         ├── FramePipeline.kt           # 取帧节流 / 缓存 / 结论分发 / 自绘区域排除
         ├── PipelineHolder.kt          # 让悬浮层能把自己的绘制区域告知流水线
         ├── Matcher.kt                 # 两段式匹配（纯函数，单测覆盖）
-        ├── MatcherDebug.kt            # 匹配诊断文本（调试面板用）
+        ├── MatcherDebug.kt            # 匹配诊断开关（调试面板打开时才刷日志）
         ├── Model.kt                   # 数据模型（文本块 / 结论 / 高亮目标）
         ├── VerseIndex.kt              # 索引加载、查表、形近字等价
         ├── EffectIndex.kt             # 词句效果查表
